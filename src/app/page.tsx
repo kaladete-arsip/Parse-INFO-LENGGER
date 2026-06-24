@@ -47,14 +47,17 @@ export default function Home() {
       });
       return;
     }
-    // Otherwise, use /api/source (dev/standalone Next.js mode only — won't work in static export)
+    // Otherwise, download a local source.zip snapshot from /public.
+    // This static file is regenerated on demand and works in both dev mode
+    // and GitHub Pages static export (no API route needed).
     setIsDownloadingSource(true);
     try {
-      const res = await fetch("/api/source");
+      const res = await fetch("/source.zip");
       if (!res.ok) {
         toast({
-          title: "Download source gagal",
-          description: `HTTP ${res.status}`,
+          title: "Source zip belum tersedia",
+          description:
+            "Jalankan `bun run build:source` untuk generate /public/source.zip, atau set NEXT_PUBLIC_GITHUB_REPO untuk download langsung dari GitHub.",
           variant: "destructive",
         });
         return;
@@ -70,7 +73,7 @@ export default function Home() {
       URL.revokeObjectURL(url);
       toast({
         title: "Source code terunduh",
-        description: "lengger-ledger-converter.zip — versi terbaru dari server.",
+        description: "lengger-ledger-converter.zip — versi terbaru.",
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";

@@ -1,20 +1,21 @@
 import type { NextConfig } from "next";
 
 /**
- * Static export config — supports GitHub Pages deployment.
+ * Lengger Ledger Converter — Next.js config.
  *
- * For GitHub Pages project sites (https://username.github.io/repo-name/),
- * set NEXT_PUBLIC_BASE_PATH=/repo-name in your env.
+ * This app is 100% client-side: parsing & xlsx generation run in the browser.
+ * No server, no API routes, no database.
  *
- * For local dev or standalone Next.js deploy (Vercel/Netlify), leave
- * NEXT_PUBLIC_BASE_PATH unset (empty string).
+ * `output: "export"` produces a static site (`out/`) deployable to GitHub Pages,
+ * Netlify, or any static host. It is ignored during `next dev`, so local
+ * development works normally.
+ *
+ * For GitHub Pages project sites, set NEXT_PUBLIC_BASE_PATH=/repo-name.
  */
-
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
 
-const nextConfig: NextAuthConfig = {
-  // Static export — generates pure HTML/JS/CSS in `out/`, no Node.js server needed.
-  // Comment this line out if you want to use /api/convert or /api/source (server mode).
+const nextConfig: NextConfig = {
+  // Static export → pure HTML/JS/CSS in `out/`, no Node.js server needed.
   output: "export",
 
   // Required for static export — Next.js Image Optimization needs a server.
@@ -22,17 +23,15 @@ const nextConfig: NextAuthConfig = {
     unoptimized: true,
   },
 
-  // Base path for GitHub Pages project sites (e.g. "/lengger-ledger-converter")
+  // Base path for GitHub Pages project sites (e.g. "/lengger-ledger-converter").
   // Leave empty for root deployment (Vercel, Netlify, user GitHub Pages).
   ...(basePath ? { basePath, assetPrefix: basePath } : {}),
 
-  // Ignore TypeScript errors during build (some types from ExcelJS in browser)
+  // Ignore TypeScript errors during build (some types from ExcelJS in browser).
   typescript: {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
 };
-
-type NextAuthConfig = NextConfig;
 
 export default nextConfig;

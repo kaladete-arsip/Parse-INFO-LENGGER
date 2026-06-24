@@ -31,10 +31,9 @@ Konversi file `Info Lengger` (MD / CSV / FB scraping) menjadi Excel `.xlsx` sesu
 | Styling | Tailwind CSS 4 + shadcn/ui |
 | Excel generator | ExcelJS |
 | CSV parser | csv-parse |
-| DB (opsional) | Prisma + SQLite |
-| Source zip | system `zip` via child_process |
+| Source zip | static `public/source.zip` (regenerated via `bun run build:source`) |
 
-Tidak ada auth, tidak ada DB wajib. App berjalan 100% in-memory untuk konversi.
+**Tanpa auth, tanpa DB, tanpa server.** App berjalan 100% in-browser untuk konversi. Siap deploy ke GitHub Pages.
 
 ---
 
@@ -411,12 +410,10 @@ Kolom yang dikosongkan (B, D, E, M, T) harus diisi manual di Excel sesuai kontek
 
 ### Tombol Source (header kanan)
 
-Klik tombol **Source** di header untuk download zip source code terbaru.
+Klik tombol **Source** di header untuk download source code terbaru.
 
-- **Di GitHub Pages deploy**: tombol ini redirect ke `https://github.com/{owner}/{repo}/archive/refs/heads/main.zip` — download langsung dari GitHub repo
-- **Di local dev (`next dev`)**: tombol ini call `/api/source` (note: `/api/source` dihapus di static export mode — pakai mode dev jika butuh)
-
-GitHub Actions workflow otomatis set `NEXT_PUBLIC_GITHUB_REPO={owner}/{repo}` saat deploy, jadi tombol Source langsung jalan tanpa konfigurasi manual.
+- **Di GitHub Pages deploy**: GitHub Actions otomatis set `NEXT_PUBLIC_GITHUB_REPO={owner}/{repo}` saat build, jadi tombol Source redirect ke `https://github.com/{repo}/archive/refs/heads/main.zip` — download langsung dari GitHub repo.
+- **Di local dev (`next dev`)**: tombol ini download `public/source.zip` (static file). Jalankan `bun run build:source` untuk regenerate snapshot zip ini setelah mengubah kode.
 
 ---
 

@@ -76,112 +76,165 @@ interface ParsedLocation {
   kab: string | null;
 }
 
+/**
+ * Venue-type keywords that indicate a part is a specific location (lokasi)
+ * rather than a dusun/desa name. e.g. "Halaman Terminal Kalibeber",
+ * "Lapangan Desa Kejajar", "Pendopo Kabupaten".
+ *
+ * Uses word boundaries to avoid false positives like "Gunungsari" (desa name
+ * that contains "gunung" as a substring but not as a whole word).
+ */
+const VENUE_KEYWORDS =
+  /\b(terminal|lapangan|halaman|pendopo|alun[-\s]?alun|gedung|sekolah|masjid|gereja|pasar|jembatan|balai|aula|stadion|gor|kompleks|pabrik|rs\b|rumah\s+sakit|puskesmas|koramil|polsek|polres|perumahan|area\b|pantai|bukit|jalan|jl\.?)\b/i;
+
+interface PartInfo {
+  /** Cleaned text (prefix stripped). */
+  text: string;
+  /** True if part had "Dk."/"Dukuh" prefix → dusun. */
+  isDusun: boolean;
+  /** True if part had "Ds."/"Desa" prefix → desa. */
+  isDesa: boolean;
+  /** True if part contains a venue keyword → lokasi. */
+  isVenue: boolean;
+}
+
+/**
+ * Parse a single entry header (e.g. "1_Trenggiling, Sariyoso Kec/Kab: Wonosobo")
+ * into structured location fields.
+ *
+ * Hybrid detection strategy (priority high → low):
+ *   1. Explicit prefix: "Dk."/"Dukuh" → dusun; "Ds."/"Desa" → desa.
+ *      Prefix is stripped, clean name kept.
+ *   2. Venue keyword: "Terminal", "Lapangan", "Halaman", etc. → lokasi.
+ *   3. Count-based fallback (right-aligned to desa, then dusun):
+ *        1 part  → desa
+ *        2 parts → dusun + desa
+ *        3 parts → dusun + desa + (rest → lokasi)
+ *
+ * This implements the user's rules:
+ *   - 5 data (ideal): lokasi, dusun, desa, kec, kab
+ *   - 4 data: dusun, desa, kec, kab (lokasi empty)
+ *   - 3 data: desa, kec, kab (lokasi & dusun empty)
+ *   - Specific venue ("Terminal Kalibeber"): lokasi + remaining
+ */
 function parseHeader(header: string): ParsedLocation {
-    const m = header.match(/^\d+_(.*)$/);
-    let body = m ? m[1] : header;
+  const m = header.match(/^\d+_(.*)$/);
+  let body = m ? m[1] : header;
 
-    let kec: string | null = null;
-    let kab: string | null = null;
+  let kec: string | null = null;
+  let kab: string | null = null;
 
-    // Extract Kec/Kab dari body
-    const mKecKab = body.match(/Kec\/Kab:\s*(\S+)/i);
-    if (mKecKab) {
-      kec = mKecKab[1];
-      kab = kec;
-      body = body.slice(0, mKecKab.index).trim();
-    } else {
-      const mKec = body.match(/Kec:\s*(\S+)/i);
-      const mKab = body.match(/Kab:\s*(\S+)/i);
-      if (mKec) kec = mKec[1];
-      if (mKab) kab = mKab[1];
-      const starts: number[] = [];
-      if (mKec && mKec.index !== undefined) starts.push(mKec.index);
-      if (mKab && mKab.index !== undefined) starts.push(mKab.index);
-      if (starts.length > 0) {
-        body = body.slice(0, Math.min(...starts)).trim();
-      }
-    }
-
-    // Extract Kec/Kab dari original body sebelum splitting
+  // Extract kec & kab from markers
+  const mKecKab = body.match(/Kec\/Kab:\s*(\S+)/i);
+  if (mKecKab) {
+    // Combined marker: kec = kab = same value
+    kec = mKecKab[1];
+    kab = kec;
+    body = body.slice(0, mKecKab.index).trim();
+  } else {
     const mKec = body.match(/Kec:\s*(\S+)/i);
     const mKab = body.match(/Kab:\s*(\S+)/i);
     if (mKec) kec = mKec[1];
     if (mKab) kab = mKab[1];
+    const starts: number[] = [];
+    if (mKec && mKec.index !== undefined) starts.push(mKec.index);
+    if (mKab && mKab.index !== undefined) starts.push(mKab.index);
+    if (starts.length > 0) {
+      body = body.slice(0, Math.min(...starts)).trim();
+    }
+  }
 
-    body = body.replace(/,+$/, "").trim();
-    const parts = body.split(",").map((p) => p.trim()).filter(Boolean);
+  // Clean trailing commas/whitespace, split into parts
+  body = body.replace(/,+$/, "").trim();
+  const parts = body.split(",").map((p) => p.trim()).filter(Boolean);
 
-    let lokasi: string | null = null;
-    let dusun: string | null = null;
-    let desa: string | null = null;
+  // Analyze each part: detect prefix & venue keyword
+  const infos: PartInfo[] = parts.map((p) => {
+    const lower = p.toLowerCase();
+    let isDusun = false;
+    let isDesa = false;
+    let text = p;
 
-    // Logic untuk parsing lokasi:
-    // Rule: kec dan kab jelas (selalu ada jika tidak kosong)
-    // Rule: sebelum kec = pasti desa
-    // Rule: sebelum desa = pasti dusun
-    // AI hanya mikir dusun, desa, kec, kab (lokasi bisa kosong)
-    // Variasi data:
-    // - lengkap: lokasi, dusun, desa, kec, kab
-    // - hanya: dusun, desa, kec, kab
-    // - hanya: desa, kec, kab
-    // - hanya: kec, kab
-    // - hanya: kab
-    
-    if (parts.length > 0) {
-      // Cari posisi dusun (Dk., Dukuh)
-      let dusunIndex = -1;
-      for (let i = 0; i < parts.length; i++) {
-        const partLower = parts[i].toLowerCase();
-        if (partLower.startsWith("dk.") || partLower.startsWith("dukuh")) {
-          dusunIndex = i;
-          break;
-        }
-      }
-      
-      // Cari posisi desa (Ds., Desa)
-      let desaIndex = -1;
-      for (let i = 0; i < parts.length; i++) {
-        const partLower = parts[i].toLowerCase();
-        if (partLower.startsWith("ds.") || partLower.startsWith("desa")) {
-          desaIndex = i;
-          break;
-        }
-      }
-      
-      // Tentukan urutan parsing
-      if (dusunIndex !== -1 && desaIndex !== -1) {
-        // Case: dusun, desa, (lokasi), kec, kab
-        dusun = parts[dusunIndex];
-        desa = parts[desaIndex].replace(/^desa\s+/i, "").trim();
-        
-        // Sisa bagian setelah desa adalah lokasi (jika ada)
-        if (desaIndex + 1 < parts.length) {
-          lokasi = parts.slice(desaIndex + 1).join(", ");
-        }
-      } else if (desaIndex !== -1) {
-        // Case: desa, kec, kab
-        desa = parts[desaIndex].replace(/^desa\s+/i, "").trim();
-        
-        // Sisa bagian sebelum desa adalah lokasi (jika ada)
-        if (desaIndex > 0) {
-          lokasi = parts.slice(0, desaIndex).join(", ");
-        }
-      } else if (kec || kab) {
-        // Case: kec, kab (tanpa desa dan dusun)
-        // Sisa bagian adalah lokasi
-        lokasi = parts.join(", ");
-      } else {
-        // Case: tidak ada kec/kab, maka bagian pertama adalah desa
-        desa = parts[0];
-        // Sisa bagian adalah lokasi
-        if (parts.length > 1) {
-          lokasi = parts.slice(1).join(", ");
-        }
-      }
+    if (lower.startsWith("dk.") || lower.startsWith("dukuh ")) {
+      isDusun = true;
+      text = p.replace(/^dk\.\s*/i, "").replace(/^dukuh\s+/i, "").trim();
+    } else if (lower.startsWith("ds.") || lower.startsWith("desa ")) {
+      isDesa = true;
+      text = p.replace(/^ds\.\s*/i, "").replace(/^desa\s+/i, "").trim();
     }
 
-    return { lokasi, dusun, desa, kec, kab };
+    const isVenue = VENUE_KEYWORDS.test(p);
+    return { text, isDusun, isDesa, isVenue };
+  });
+
+  let lokasi: string | null = null;
+  let dusun: string | null = null;
+  let desa: string | null = null;
+
+  // Pass 1: explicit prefixes (strongest signal)
+  const dusunExplicit = infos.find((i) => i.isDusun);
+  const desaExplicit = infos.find((i) => i.isDesa);
+  if (dusunExplicit) dusun = dusunExplicit.text;
+  if (desaExplicit) desa = desaExplicit.text;
+
+  // Unmarked parts (no explicit prefix)
+  const unmarked = infos.filter((i) => !i.isDusun && !i.isDesa);
+
+  if (unmarked.length > 0) {
+    // Pass 2: venue keyword → lokasi
+    const venuePart = unmarked.find((i) => i.isVenue);
+    const nonVenue = unmarked.filter((i) => !i.isVenue);
+
+    if (venuePart) {
+      lokasi = venuePart.text;
+    }
+
+    // Pass 3: count-based assignment for non-venue unmarked parts
+    if (dusun && desa) {
+      // Both set by prefixes; all remaining non-venue → lokasi
+      if (nonVenue.length > 0) {
+        const extra = nonVenue.map((i) => i.text).join(", ");
+        lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+      }
+    } else if (desa && !dusun) {
+      // Desa set, dusun not: first non-venue → dusun, rest → lokasi
+      if (nonVenue.length >= 1) {
+        dusun = nonVenue[0].text;
+        if (nonVenue.length > 1) {
+          const extra = nonVenue.slice(1).map((i) => i.text).join(", ");
+          lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+        }
+      }
+    } else if (dusun && !desa) {
+      // Dusun set, desa not: first non-venue → desa, rest → lokasi
+      if (nonVenue.length >= 1) {
+        desa = nonVenue[0].text;
+        if (nonVenue.length > 1) {
+          const extra = nonVenue.slice(1).map((i) => i.text).join(", ");
+          lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+        }
+      }
+    } else {
+      // Neither dusun nor desa set: pure count-based (right-aligned)
+      //   1 part  → desa
+      //   2 parts → dusun + desa
+      //   3+      → dusun + desa + (rest → lokasi)
+      if (nonVenue.length === 1) {
+        desa = nonVenue[0].text;
+      } else if (nonVenue.length === 2) {
+        dusun = nonVenue[0].text;
+        desa = nonVenue[1].text;
+      } else if (nonVenue.length >= 3) {
+        dusun = nonVenue[0].text;
+        desa = nonVenue[1].text;
+        const extra = nonVenue.slice(2).map((i) => i.text).join(", ");
+        lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+      }
+    }
   }
+
+  return { lokasi, dusun, desa, kec, kab };
+}
 
 function splitNames(text: string): string[] {
   if (!text) return [];
@@ -198,21 +251,21 @@ function splitNames(text: string): string[] {
 }
 
 /**
- * Normalize rombongan name: convert " & " (multiple groups) to "; " separator.
- * Single-group names with commas (e.g. homebase info) are left untouched.
+ * Rombongan name is kept AS-IS from the RAW source.
  *
- * Examples:
- *   "Sri Muda Rahayu & Wahyu Margi Utomo" → "Sri Muda Rahayu; Wahyu Margi Utomo"
- *   "Wargo Ngudi Budoyo, Salaman, Lengkong Kec: Garung Kab: Wonosobo" → unchanged
+ * The name may contain:
+ *   - Multiple groups separated by " & " (e.g. "Sri Muda Rahayu & Wahyu Margi Utomo")
+ *   - Homebase info with commas & Kec/Kab (e.g. "Wargo Ngudi Budoyo, Salaman, Lengkong Kec: Garung Kab: Wonosobo")
+ *
+ * We do NOT normalize or split — the homebase location embedded in the name is
+ * NOT the pentas location, so it must stay verbatim for manual review in Excel.
  */
-function normalizeRombongan(name: string): string {
-  return name.replace(/\s*&\s*/g, "; ");
-}
 
 interface RawEntry {
   header: string;
   extra: string[];
   tanggal: string | null; // date context at the time this entry was parsed
+  sumber: string | null; // per-section source link (nearest "Sumber :" in this section)
 }
 
 /**
@@ -222,57 +275,94 @@ interface RawEntry {
  * appear multiple times throughout the file. Each entry inherits the date
  * from the most recent "Info Lengger" line above it.
  *
- * Also detects the trailing "Sumber :" line and the "-----" separator.
+ * Source link ("Sumber :") is tracked PER-SECTION. A new section starts at
+ * each "Info Lengger" header. When a "Sumber :" line appears, it is assigned
+ * to ALL entries in the current section (backfilled — "Sumber :" usually
+ * appears at the END of a section, after the entries). This way, a single
+ * file with multiple days can have a different source link per day, and each
+ * row gets the correct source for its day.
+ *
+ * Also handles "-----" and "=====" separators (skipped, not section dividers).
  */
 function splitEntries(mdText: string): {
   entries: RawEntry[];
-  sumber: string | null;
   tanggalList: string[];
 } {
   const rawLines = mdText.split(/\r?\n/).map((l) => l.replace(/\s+$/, ""));
   const lines = rawLines.filter((l) => l.trim().length > 0);
 
-  let sumber: string | null = null;
   const entries: RawEntry[] = [];
   const tanggalList: string[] = [];
   let current: RawEntry | null = null;
   let currentDate: string | null = null;
+  let currentSectionSumber: string | null = null;
+  // Index in `entries` where the current section starts (for backfill).
+  let sectionStartIndex = 0;
 
   for (const ln of lines) {
     const trimmed = ln.trim();
 
-    // Skip the "-----" separator
+    // Skip "-----" and "=====" separators (not section dividers, just noise)
     if (/^-{3,}$/.test(trimmed)) continue;
+    if (/^={3,}$/.test(trimmed)) continue;
 
-    // Detect "Info Lengger <Day>, DD Month YYYY" — sets current date context
+    // Detect "Info Lengger <Day>, DD Month YYYY" — starts a NEW section.
+    // Flush the previous entry (if any) with its section's sumber, then reset
+    // sumber so the new day starts with no inherited source.
     const infoMatch = trimmed.match(/^info lengger\s+.+$/i);
     if (infoMatch) {
+      if (current) {
+        current.sumber = currentSectionSumber;
+        entries.push(current);
+        current = null;
+      }
       const parsed = parseDateStr(trimmed);
       if (parsed) {
         currentDate = parsed;
         if (!tanggalList.includes(parsed)) tanggalList.push(parsed);
       }
+      currentSectionSumber = null;
+      sectionStartIndex = entries.length;
       continue;
     }
 
-    // Detect "Sumber :" line (anywhere in the doc, typically at the bottom)
+    // Detect "Sumber :" line — assign to current section (backfill all entries
+    // in this section, plus the pending `current` entry).
     const sumberMatch = trimmed.match(/^Sumber\s*:\s*(.+)$/i);
     if (sumberMatch) {
-      sumber = sumberMatch[1].trim();
+      currentSectionSumber = sumberMatch[1].trim();
+      // Backfill all already-pushed entries in this section
+      for (let i = sectionStartIndex; i < entries.length; i++) {
+        entries[i].sumber = currentSectionSumber;
+      }
+      // Also apply to the pending entry (last entry of section, not yet pushed)
+      if (current) current.sumber = currentSectionSumber;
       continue;
     }
 
     // New entry starts with "<n>_<text>"
     if (/^\d+_/.test(trimmed)) {
-      if (current) entries.push(current);
-      current = { header: trimmed, extra: [], tanggal: currentDate };
+      if (current) {
+        current.sumber = currentSectionSumber;
+        entries.push(current);
+      }
+      current = {
+        header: trimmed,
+        extra: [],
+        tanggal: currentDate,
+        sumber: currentSectionSumber,
+      };
     } else if (current) {
       current.extra.push(trimmed);
     }
   }
-  if (current) entries.push(current);
+  // Flush the last pending entry with its section's sumber
+  if (current) {
+    current.sumber = currentSectionSumber;
+    entries.push(current);
+  }
 
-  return { entries, sumber, tanggalList };
+  return { entries, tanggalList };
 }
 
 interface SpecialMapping {
@@ -331,7 +421,7 @@ function mapSpecialActivity(label: string): SpecialMapping | null {
 export function parseMd(mdText: string, filename?: string): ParseResult {
   const warnings: string[] = [];
   const fallbackTanggal = detectTanggal(mdText, filename);
-  const { entries, sumber, tanggalList } = splitEntries(mdText);
+  const { entries, tanggalList } = splitEntries(mdText);
 
   // If no per-section date headers were found, fall back to single-date detection
   const effectiveTanggalList = tanggalList.length > 0
@@ -350,25 +440,41 @@ export function parseMd(mdText: string, filename?: string): ParseResult {
     let lengger: string[] = [];
     let sinden: string[] = [];
     let artis: string[] = [];
+    let wiraswara: string[] = [];
     let isMbeniTok = false;
 
     for (const ln of e.extra) {
       const cleaned = ln.trim();
       if (!cleaned) continue;
 
-      // Detect "MBENGI TOK" / "MBENGI THOK" / "MBENI TOK" marker anywhere in
-      // the line (case-insensitive). May appear as a standalone line or
-      // embedded (e.g. "MBENGI THOK" inside quotes).
+      // Detect "MBENGI TOK" / "MBENGI THOK" / "MBENI TOK" marker.
+      // May appear standalone, quoted ("MBENGI THOK"), or embedded in a line.
+      // If the line is PURELY the marker (after stripping quotes), set
+      // isMbeniTok and skip — it must NOT be treated as aktivitasSpecial.
+      const strippedForMbeni = cleaned.replace(/^"|"$/g, "").trim();
+      if (/^mbeng?i\s*th?ok$/i.test(strippedForMbeni)) {
+        isMbeniTok = true;
+        continue;
+      }
+      // Embedded marker (e.g. marker inside other text) — set flag but
+      // keep processing the line for other patterns.
       if (/mbeng?i\s*th?ok/i.test(cleaned)) {
         isMbeniTok = true;
       }
 
-      const mRomb = cleaned.match(/^\(Romb\s+(.*)\)\s*$/);
+      // Match "(Romb ...)" or abbreviation "(Rom ...)". Both forms appear in
+      // real sources — some entries use "Rom" as shorthand for "Rombongan".
+      const mRomb = cleaned.match(/^\(Romb?\s+(.*)\)\s*$/);
       if (mRomb) {
-        rombongan = normalizeRombongan(mRomb[1].trim());
+        // Keep rombongan name AS-IS from RAW source (no normalization).
+        // The name may contain homebase info with " & " or "Kec:/Kab:" —
+        // that is NOT the pentas location, so we preserve it verbatim.
+        rombongan = mRomb[1].trim();
         continue;
       }
-      const mQuote = cleaned.match(/^"(.+)"\s*$/);
+      // Quoted activity marker. Handles BOTH closed quotes ("TAYUB") and
+      // unclosed quotes ("JARANAN & WAROK — missing closing quote in source).
+      const mQuote = cleaned.match(/^"(.+?)"?\s*$/);
       if (mQuote) {
         aktivitasSpecial = mQuote[1].trim();
         continue;
@@ -388,6 +494,11 @@ export function parseMd(mdText: string, filename?: string): ParseResult {
       }
       if (/^artis[e]?\s*:/i.test(cleaned)) {
         artis = splitNames(cleaned.replace(/^artis[e]?\s*:\s*/i, ""));
+        continue;
+      }
+      // Wiraswara = gamelan musician (niyogo player). New role.
+      if (/^wiraswara\s*:/i.test(cleaned)) {
+        wiraswara = splitNames(cleaned.replace(/^wiraswara\s*:\s*/i, ""));
         continue;
       }
     }
@@ -430,6 +541,10 @@ export function parseMd(mdText: string, filename?: string): ParseResult {
       namaList.push(n);
       peranList.push("Sinden");
     }
+    for (const n of wiraswara) {
+      namaList.push(n);
+      peranList.push("Wiraswara");
+    }
 
     const row: RowData = {
       Tanggal: rowTanggal,
@@ -443,7 +558,7 @@ export function parseMd(mdText: string, filename?: string): ParseResult {
       Peran_Rombongan,
       nama_individu: namaList.length > 0 ? namaList.join("; ") : null,
       peran_individu: peranList.length > 0 ? peranList.join("; ") : null,
-      sumber: sumber,
+      sumber: e.sumber, // per-section source link (each day gets its own)
       bukti: null,
       Lokasi: loc.lokasi,
       "nama_dusun/kampung": loc.dusun,
