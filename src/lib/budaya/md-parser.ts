@@ -116,38 +116,75 @@ function parseHeader(header: string): ParsedLocation {
 
   const namedVenueKeywords = ["halaman", "lapangan", "terminal", "pendapa", "alun-alun", "balaidesa"];
   
-  // Logic untuk lokasi spesifik (case 3: lapangan kemiri, kec: Mojotengah Kab: Wonosobo)
-  // Jika ada kecamatan/kabupaten setelah lokasi spesifik, lokasi spesifik tetap terisi
-  if (parts.length > 0 && namedVenueKeywords.some((kw) => parts[0].toLowerCase().includes(kw))) {
-    // Cek apakah ada kecamatan/kabupaten di bagian yang sama
-    const hasLocationWithKecKab = parts.some((p) => 
-      p.toLowerCase().includes("kec:") || p.toLowerCase().includes("kab:")
-    );
+  // Logic untuk parsing lokasi yang fleksibel:
+  // Case 1: dusun, desa, kec, kab (lengkap)
+  // Case 2: desa, kec, kab
+  // Case 3: lokasi, kec, kab (lokasi spesifik)
+  // Case 4: lokasi, kab (lokasi spesifik tanpa kecamatan)
+  
+  if (parts.length > 0) {
+    const firstPart = parts[0].toLowerCase();
     
-    if (hasLocationWithKecKab) {
-      // Case 3: lokasi spesifik di lapangan, kec: Mojotengah Kab: Wonosobo
-      // Extract lokasi spesifik, kec, kab
-      let specificLocation: string = parts[0];
+    // Cek apakah lokasi spesifik (halaman, lapangan, terminal, pendapa, alun-alun, balaidesa)
+    if (namedVenueKeywords.some((kw) => firstPart.includes(kw))) {
+      // Case 3 & 4: lokasi spesifik
+      lokasi = parts[0];
       
-      // Kec and kab are already extracted above
-      lokasi = specificLocation;
-    } else {
-      // Case lain: hanya lokasi spesifik tanpa kecamatan/kabupaten
-      lokasi = body;
-    }
+      // Jika ada kecamatan/kabupaten di bagian yang sama
+      const hasKecKab = parts.some((p) => 
+        p.toLowerCase().includes("kec:") || p.toLowerCase().includes("kab:")
+      );
+      
+      // Kec and kab sudah diextract di atas
   } else {
-    // Case 1 & 2: Kasemen, Tlogomulyo Kec: Kertek Kab: Wonosobo atau Gondang Kec: Watumalang Kab: Wonosobo
-    // Penulisan sebelum kecamatan adalah desa
-    const cleaned = parts.map((p) =>
-      p
-        .replace(/^Dk\.\s*/i, "")
-        .replace(/^Ds\.\s*/i, "")
-        .replace(/^Dukuh\s+/i, "")
-        .replace(/^Desa\s+/i, "")
-        .trim()
-    );
-    if (cleaned.length >= 1) desa = cleaned[0];
-    if (cleaned.length >= 2) lokasi = cleaned.slice(1).join(", ");
+    // Case 1 & 2: dusun/desa, kec, kab
+    // Cek apakah bagian pertama adalah dusun (Dk., Dukuh) atau desa (Ds., Desa)
+    // Cek original part, not cleaned
+    if (parts.length >= 1) {
+      const firstPartOriginal = parts[0];
+      const firstPartLower = firstPartOriginal.toLowerCase();
+      
+      // Cek apakah bagian pertama adalah dusun
+      if (firstPartLower.startsWith("dk") || 
+          firstPartLower.startsWith("dukuh")) {
+        dusun = parts[0];
+        // Sisa bagian adalah desa dan lokasi
+        if (parts.length >= 2) {
+          // Bagian kedua bisa berisi "Desa X" atau langsung nama desa
+          const secondPartLower = parts[1].toLowerCase();
+          if (secondPartLower.startsWith("ds") || secondPartLower.startsWith("desa")) {
+            // Strip "Desa" prefix if present
+            desa = parts[1].replace(/^desa\s+/i, "").trim();
+            // Sisa bagian adalah lokasi
+            if (parts.length >= 3) lokasi = parts.slice(2).join(", ");
+          } else {
+            // Bagian kedua langsung nama desa
+            desa = parts[1];
+            // Sisa bagian adalah lokasi
+            if (parts.length >= 3) lokasi = parts.slice(2).join(", ");
+          }
+        }
+      } else if (parts.length >= 2) {
+        // Cek apakah bagian kedua adalah desa (jika bagian pertama bukan dusun)
+        const secondPartLower = parts[1].toLowerCase();
+        if (secondPartLower.startsWith("ds") || 
+            secondPartLower.startsWith("desa")) {
+          // Strip "Desa" prefix if present
+          desa = parts[1].replace(/^desa\s+/i, "").trim();
+          // Sisa bagian adalah lokasi
+          if (parts.length >= 3) lokasi = parts.slice(2).join(", ");
+        } else {
+          // Bagian pertama adalah desa
+          desa = parts[0].replace(/^desa\s+/i, "").trim();
+          // Sisa bagian adalah lokasi
+          if (parts.length >= 2) lokasi = parts.slice(1).join(", ");
+        }
+      } else {
+        // Hanya satu bagian, anggap sebagai desa
+        desa = parts[0].replace(/^desa\s+/i, "").trim();
+      }
+    }
+  }
   }
 
   return { lokasi, dusun, desa, kec, kab };
