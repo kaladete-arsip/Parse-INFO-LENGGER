@@ -77,63 +77,57 @@ interface ParsedLocation {
 }
 
 function parseHeader(header: string): ParsedLocation {
-  const m = header.match(/^\d+_(.*)$/);
-  let body = m ? m[1] : header;
+    const m = header.match(/^\d+_(.*)$/);
+    let body = m ? m[1] : header;
 
-  let kec: string | null = null;
-  let kab: string | null = null;
+    let kec: string | null = null;
+    let kab: string | null = null;
 
-  const mKecKab = body.match(/Kec\/Kab:\s*(\S+)/);
-  if (mKecKab) {
-    kec = mKecKab[1];
-    kab = kec;
-    body = body.slice(0, mKecKab.index).trim();
-  } else {
-    const mKec = body.match(/Kec:\s*(\S+)/);
-    const mKab = body.match(/Kab:\s*(\S+)/);
+    // Extract Kec/Kab dari body
+    const mKecKab = body.match(/Kec\/Kab:\s*(\S+)/i);
+    if (mKecKab) {
+      kec = mKecKab[1];
+      kab = kec;
+      body = body.slice(0, mKecKab.index).trim();
+    } else {
+      const mKec = body.match(/Kec:\s*(\S+)/i);
+      const mKab = body.match(/Kab:\s*(\S+)/i);
+      if (mKec) kec = mKec[1];
+      if (mKab) kab = mKab[1];
+      const starts: number[] = [];
+      if (mKec && mKec.index !== undefined) starts.push(mKec.index);
+      if (mKab && mKab.index !== undefined) starts.push(mKab.index);
+      if (starts.length > 0) {
+        body = body.slice(0, Math.min(...starts)).trim();
+      }
+    }
+
+    // Extract Kec/Kab dari original body sebelum splitting
+    const mKec = body.match(/Kec:\s*(\S+)/i);
+    const mKab = body.match(/Kab:\s*(\S+)/i);
     if (mKec) kec = mKec[1];
     if (mKab) kab = mKab[1];
-    const starts: number[] = [];
-    if (mKec && mKec.index !== undefined) starts.push(mKec.index);
-    if (mKab && mKab.index !== undefined) starts.push(mKab.index);
-    if (starts.length > 0) {
-      body = body.slice(0, Math.min(...starts)).trim();
-    }
-  }
 
-  let lokasi: string | null = null;
-  let dusun: string | null = null;
-  let desa: string | null = null;
+    body = body.replace(/,+$/, "").trim();
+    const parts = body.split(",").map((p) => p.trim()).filter(Boolean);
 
-  // Extract Kec/Kab from the original body before splitting
-  const mKec = body.match(/Kec:\s*(\S+)/i);
-  const mKab = body.match(/Kab:\s*(\S+)/i);
-  if (mKec) kec = mKec[1];
-  if (mKab) kab = mKab[1];
+    let lokasi: string | null = null;
+    let dusun: string | null = null;
+    let desa: string | null = null;
 
-  body = body.replace(/,+$/, "").trim();
-  const parts = body.split(",").map((p) => p.trim()).filter(Boolean);
-
-  const namedVenueKeywords = ["halaman", "lapangan", "terminal", "pendapa", "alun-alun", "balaidesa"];
-  
-  // Logic untuk parsing lokasi:
-  // Rule: sebelum kec = pasti desa, sebelum desa = pasti dusun
-  // Urutan: lokasi, dusun, desa, kec, kab
-  // Variasi: 
-  // - lokasi, dusun, desa, kec, kab
-  // - dusun, desa, kec, kab
-  // - desa, kec, kab
-  // - kec, kab
-  // - kab
-  
-  if (parts.length > 0) {
-    const firstPartLower = parts[0].toLowerCase();
+    // Logic untuk parsing lokasi:
+    // Rule: kec dan kab jelas (selalu ada jika tidak kosong)
+    // Rule: sebelum kec = pasti desa
+    // Rule: sebelum desa = pasti dusun
+    // AI hanya mikir dusun, desa, kec, kab (lokasi bisa kosong)
+    // Variasi data:
+    // - lengkap: lokasi, dusun, desa, kec, kab
+    // - hanya: dusun, desa, kec, kab
+    // - hanya: desa, kec, kab
+    // - hanya: kec, kab
+    // - hanya: kab
     
-    // Cek apakah bagian pertama adalah lokasi spesifik
-    if (namedVenueKeywords.some((kw) => firstPartLower.includes(kw))) {
-      // Case: lokasi spesifik
-      lokasi = parts[0];
-    } else {
+    if (parts.length > 0) {
       // Cari posisi dusun (Dk., Dukuh)
       let dusunIndex = -1;
       for (let i = 0; i < parts.length; i++) {
@@ -172,6 +166,10 @@ function parseHeader(header: string): ParsedLocation {
         if (desaIndex > 0) {
           lokasi = parts.slice(0, desaIndex).join(", ");
         }
+      } else if (kec || kab) {
+        // Case: kec, kab (tanpa desa dan dusun)
+        // Sisa bagian adalah lokasi
+        lokasi = parts.join(", ");
       } else {
         // Case: tidak ada kec/kab, maka bagian pertama adalah desa
         desa = parts[0];
@@ -181,10 +179,9 @@ function parseHeader(header: string): ParsedLocation {
         }
       }
     }
-  }
 
-  return { lokasi, dusun, desa, kec, kab };
-}
+    return { lokasi, dusun, desa, kec, kab };
+  }
 
 function splitNames(text: string): string[] {
   if (!text) return [];
