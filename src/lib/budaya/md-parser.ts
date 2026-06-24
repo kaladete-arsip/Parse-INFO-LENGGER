@@ -105,13 +105,39 @@ function parseHeader(header: string): ParsedLocation {
   let dusun: string | null = null;
   let desa: string | null = null;
 
+  // Extract Kec/Kab from the original body before splitting
+  const mKec = body.match(/Kec:\s*(\S+)/i);
+  const mKab = body.match(/Kab:\s*(\S+)/i);
+  if (mKec) kec = mKec[1];
+  if (mKab) kab = mKab[1];
+
   body = body.replace(/,+$/, "").trim();
   const parts = body.split(",").map((p) => p.trim()).filter(Boolean);
 
   const namedVenueKeywords = ["halaman", "lapangan", "terminal", "pendapa", "alun-alun", "balaidesa"];
+  
+  // Logic untuk lokasi spesifik (case 3: lapangan kemiri, kec: Mojotengah Kab: Wonosobo)
+  // Jika ada kecamatan/kabupaten setelah lokasi spesifik, lokasi spesifik tetap terisi
   if (parts.length > 0 && namedVenueKeywords.some((kw) => parts[0].toLowerCase().includes(kw))) {
-    lokasi = body;
+    // Cek apakah ada kecamatan/kabupaten di bagian yang sama
+    const hasLocationWithKecKab = parts.some((p) => 
+      p.toLowerCase().includes("kec:") || p.toLowerCase().includes("kab:")
+    );
+    
+    if (hasLocationWithKecKab) {
+      // Case 3: lokasi spesifik di lapangan, kec: Mojotengah Kab: Wonosobo
+      // Extract lokasi spesifik, kec, kab
+      let specificLocation: string = parts[0];
+      
+      // Kec and kab are already extracted above
+      lokasi = specificLocation;
+    } else {
+      // Case lain: hanya lokasi spesifik tanpa kecamatan/kabupaten
+      lokasi = body;
+    }
   } else {
+    // Case 1 & 2: Kasemen, Tlogomulyo Kec: Kertek Kab: Wonosobo atau Gondang Kec: Watumalang Kab: Wonosobo
+    // Penulisan sebelum kecamatan adalah desa
     const cleaned = parts.map((p) =>
       p
         .replace(/^Dk\.\s*/i, "")
@@ -120,9 +146,8 @@ function parseHeader(header: string): ParsedLocation {
         .replace(/^Desa\s+/i, "")
         .trim()
     );
-    if (cleaned.length >= 1) dusun = cleaned[0];
-    if (cleaned.length >= 2) desa = cleaned[1];
-    if (cleaned.length >= 3) lokasi = cleaned.slice(2).join(", ");
+    if (cleaned.length >= 1) desa = cleaned[0];
+    if (cleaned.length >= 2) lokasi = cleaned.slice(1).join(", ");
   }
 
   return { lokasi, dusun, desa, kec, kab };
