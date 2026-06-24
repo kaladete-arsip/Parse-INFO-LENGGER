@@ -117,64 +117,68 @@ function parseHeader(header: string): ParsedLocation {
   const namedVenueKeywords = ["halaman", "lapangan", "terminal", "pendapa", "alun-alun", "balaidesa"];
   
   // Logic untuk parsing lokasi:
-  // Case 1: lokasi spesifik (halaman, lapangan, terminal, pendapa, alun-alun, balaidesa)
-  // Case 2: lokasi, desa, dusun
-  // Case 3: dusun, desa, lokasi
-  // Case 4: desa, lokasi
-  // Case 5: lokasi saja
+  // Rule: sebelum kec = pasti desa, sebelum desa = pasti dusun
+  // Urutan: lokasi, dusun, desa, kec, kab
+  // Variasi: 
+  // - lokasi, dusun, desa, kec, kab
+  // - dusun, desa, kec, kab
+  // - desa, kec, kab
+  // - kec, kab
+  // - kab
   
   if (parts.length > 0) {
-    const firstPart = parts[0];
-    const firstPartLower = firstPart.toLowerCase();
+    const firstPartLower = parts[0].toLowerCase();
     
     // Cek apakah bagian pertama adalah lokasi spesifik
     if (namedVenueKeywords.some((kw) => firstPartLower.includes(kw))) {
-      // Case 1: lokasi spesifik
+      // Case: lokasi spesifik
       lokasi = parts[0];
-    } else if (parts.length >= 2) {
-      const secondPartLower = parts[1].toLowerCase();
-      
-      // Cek apakah bagian kedua adalah desa (Ds., Desa)
-      if (secondPartLower.startsWith("ds.") || 
-          secondPartLower.startsWith("desa")) {
-        // Case 2: lokasi, desa, dusun
-        lokasi = parts[0];
-        desa = parts[1].replace(/^desa\s+/i, "").trim();
-        if (parts.length >= 3) {
-          dusun = parts[parts.length - 1];
-        }
-      } else {
-        // Cek apakah bagian pertama adalah dusun (Dk., Dukuh)
-        if (firstPartLower.startsWith("dk.") || 
-            firstPartLower.startsWith("dukuh")) {
-          // Case 3: dusun, desa, lokasi
-          dusun = parts[0];
-          desa = parts[1].replace(/^desa\s+/i, "").trim();
-          if (parts.length >= 3) {
-            lokasi = parts.slice(2).join(", ");
-          }
-        } else {
-          // Cek apakah bagian pertama adalah desa (Ds., Desa)
-          if (firstPartLower.startsWith("ds.") || 
-              firstPartLower.startsWith("desa")) {
-            // Case 4: desa, lokasi
-            desa = parts[0].replace(/^desa\s+/i, "").trim();
-            lokasi = parts[1];
-          } else {
-            // Case 5: lokasi saja
-            lokasi = parts[0];
-          }
+    } else {
+      // Cari posisi dusun (Dk., Dukuh)
+      let dusunIndex = -1;
+      for (let i = 0; i < parts.length; i++) {
+        const partLower = parts[i].toLowerCase();
+        if (partLower.startsWith("dk.") || partLower.startsWith("dukuh")) {
+          dusunIndex = i;
+          break;
         }
       }
-    } else {
-      // Hanya satu bagian
-      if (firstPartLower.startsWith("dk.") || 
-          firstPartLower.startsWith("dukuh")) {
-        // Case 3: dusun saja
-        dusun = parts[0];
+      
+      // Cari posisi desa (Ds., Desa)
+      let desaIndex = -1;
+      for (let i = 0; i < parts.length; i++) {
+        const partLower = parts[i].toLowerCase();
+        if (partLower.startsWith("ds.") || partLower.startsWith("desa")) {
+          desaIndex = i;
+          break;
+        }
+      }
+      
+      // Tentukan urutan parsing
+      if (dusunIndex !== -1 && desaIndex !== -1) {
+        // Case: dusun, desa, (lokasi), kec, kab
+        dusun = parts[dusunIndex];
+        desa = parts[desaIndex].replace(/^desa\s+/i, "").trim();
+        
+        // Sisa bagian setelah desa adalah lokasi (jika ada)
+        if (desaIndex + 1 < parts.length) {
+          lokasi = parts.slice(desaIndex + 1).join(", ");
+        }
+      } else if (desaIndex !== -1) {
+        // Case: desa, kec, kab
+        desa = parts[desaIndex].replace(/^desa\s+/i, "").trim();
+        
+        // Sisa bagian sebelum desa adalah lokasi (jika ada)
+        if (desaIndex > 0) {
+          lokasi = parts.slice(0, desaIndex).join(", ");
+        }
       } else {
-        // Case 4: desa saja
-        desa = parts[0].replace(/^desa\s+/i, "").trim();
+        // Case: tidak ada kec/kab, maka bagian pertama adalah desa
+        desa = parts[0];
+        // Sisa bagian adalah lokasi
+        if (parts.length > 1) {
+          lokasi = parts.slice(1).join(", ");
+        }
       }
     }
   }
