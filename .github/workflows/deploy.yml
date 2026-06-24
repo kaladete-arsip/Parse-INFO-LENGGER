@@ -31,6 +31,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Generate Prisma Client
+        run: bun run db:generate
+
+      - name: Push Prisma Schema
+        run: bun run db:push --accept-data-loss
+
       - name: Configure GitHub Pages basePath
         run: |
           # Get repo name from GITHUB_REPOSITORY (format: "owner/repo")
