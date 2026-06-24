@@ -1,0 +1,74 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Allow GitHub Pages to read from this repo
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Configure GitHub Pages basePath
+        run: |
+          # Get repo name from GITHUB_REPOSITORY (format: "owner/repo")
+          REPO_NAME=$(basename $GITHUB_REPOSITORY)
+          echo "Repo name: $REPO_NAME"
+          # Set basePath for GitHub Pages project site
+          # If repo is named "username.github.io", basePath should be empty
+          if [[ "$REPO_NAME" == *.github.io ]]; then
+            echo "User/org Pages — no basePath needed"
+            echo "NEXT_PUBLIC_BASE_PATH=" >> $GITHUB_ENV
+            echo "NEXT_PUBLIC_GITHUB_REPO=$GITHUB_REPOSITORY" >> $GITHUB_ENV
+          else
+            echo "Project Pages — basePath=/$REPO_NAME"
+            echo "NEXT_PUBLIC_BASE_PATH=/$REPO_NAME" >> $GITHUB_ENV
+            echo "NEXT_PUBLIC_GITHUB_REPO=$GITHUB_REPOSITORY" >> $GITHUB_ENV
+          fi
+
+      - name: Build static export
+        run: bun run build
+        env:
+          NEXT_PUBLIC_BASE_PATH: ${{ env.NEXT_PUBLIC_BASE_PATH }}
+          NEXT_PUBLIC_GITHUB_REPO: ${{ env.NEXT_PUBLIC_GITHUB_REPO }}
+
+      - name: Add .nojekyll (bypass Jekyll processing)
+        run: touch out/.nojekyll
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
