@@ -1,0 +1,1278 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useEffect, useRef, useState } from "react";
+     4→import {
+     5→  Upload,
+     6→  FileSpreadsheet,
+     7→  FileText,
+     8→  Loader2,
+     9→  Download,
+    10→  AlertTriangle,
+    11→  CheckCircle2,
+    12→  RotateCcw,
+    13→  Code2,
+    14→  Image as ImageIcon,
+    15→  ScanText,
+    16→  X,
+    17→  Sparkles,
+    18→} from "lucide-react";
+    19→import { Button } from "@/components/ui/button";
+    20→import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+    21→import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+    22→import { Badge } from "@/components/ui/badge";
+    23→import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+    24→import { Textarea } from "@/components/ui/textarea";
+    25→import { Progress } from "@/components/ui/progress";
+    26→import { toast } from "@/hooks/use-toast";
+    27→import { parseMd, type RowData } from "@/lib/budaya/md-parser";
+    28→import { runOcrBatch, looksLikeInfoLengger, type OcrProgress } from "@/lib/budaya/ocr";
+    29→
+    30→interface ParsedPreview {
+    31→  filename: string;
+    32→  tanggalList: string[];
+    33→  rows: RowData[];
+    34→  warnings: string[];
+    35→}
+    36→
+    37→export default function Home() {
+    38→  const fileInputRef = useRef<HTMLInputElement>(null);
+    39→  const excelInputRef = useRef<HTMLInputElement>(null);
+    40→  const imageInputRef = useRef<HTMLInputElement>(null);
+    41→
+    42→  // Shared state — fed by either "File" tab or "OCR" tab
+    43→  const [fileName, setFileName] = useState<string | null>(null);
+    44→  const [fileContent, setFileContent] = useState<string | null>(null);
+    45→  const [preview, setPreview] = useState<ParsedPreview | null>(null);
+    46→  const [activeTab, setActiveTab] = useState<"file" | "ocr" | "excel">("file");
+    47→
+    48→  // File-upload tab state
+    49→  const [isDragging, setIsDragging] = useState(false);
+    50→  const [isConverting, setIsConverting] = useState(false);
+    51→  const [isGeneratingMd, setIsGeneratingMd] = useState(false);
+    52→  const [isDownloadingSource, setIsDownloadingSource] = useState(false);
+    53→  const [isExcelParsing, setIsExcelParsing] = useState(false);
+    54→  const [isGeneratingExcelMd, setIsGeneratingExcelMd] = useState(false);
+    55→  const [isGeneratingWeekly, setIsGeneratingWeekly] = useState(false);
+    56→
+    57→  // OCR tab state
+    58→  const [ocrImages, setOcrImages] = useState<File[]>([]);
+    59→  const [ocrPreviews, setOcrPreviews] = useState<string[]>([]);
+    60→  const [isDraggingImage, setIsDraggingImage] = useState(false);
+    61→  const [isOcrRunning, setIsOcrRunning] = useState(false);
+    62→  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null);
+    63→  const [ocrText, setOcrText] = useState<string>("");
+    64→  const [ocrConfidence, setOcrConfidence] = useState<number | null>(null);
+    65→
+    66→  // Revoke object URLs on unmount / when replaced
+    67→  useEffect(() => {
+    68→    return () => {
+    69→      ocrPreviews.forEach((url) => URL.revokeObjectURL(url));
+    70→    };
+    71→  }, [ocrPreviews]);
+    72→
+    73→  const onDownloadSource = useCallback(async () => {
+    74→    const githubRepo = process.env.NEXT_PUBLIC_GITHUB_REPO;
+    75→    if (githubRepo) {
+    76→      const url = `https://github.com/${githubRepo}/archive/refs/heads/main.zip`;
+    77→      window.open(url, "_blank");
+    78→      toast({
+    79→        title: "Mengarahkan ke GitHub",
+    80→        description: `Download zip dari ${url}`,
+    81→      });
+    82→      return;
+    83→    }
+    84→    setIsDownloadingSource(true);
+    85→    try {
+    86→      const res = await fetch("/source.zip");
+    87→      if (!res.ok) {
+    88→        toast({
+    89→          title: "Source zip belum tersedia",
+    90→          description:
+    91→            "Jalankan `bun run build:source` untuk generate /public/source.zip, atau set NEXT_PUBLIC_GITHUB_REPO.",
+    92→          variant: "destructive",
+    93→        });
+    94→        return;
+    95→      }
+    96→      const blob = await res.blob();
+    97→      const url = URL.createObjectURL(blob);
+    98→      const a = document.createElement("a");
+    99→      a.href = url;
+   100→      a.download = "lengger-ledger-converter.zip";
+   101→      document.body.appendChild(a);
+   102→      a.click();
+   103→      document.body.removeChild(a);
+   104→      URL.revokeObjectURL(url);
+   105→      toast({
+   106→        title: "Source code terunduh",
+   107→        description: "lengger-ledger-converter.zip — versi terbaru.",
+   108→      });
+   109→    } catch (err) {
+   110→      const msg = err instanceof Error ? err.message : "Unknown error";
+   111→      toast({
+   112→        title: "Download source gagal",
+   113→        description: msg,
+   114→        variant: "destructive",
+   115→      });
+   116→    } finally {
+   117→      setIsDownloadingSource(false);
+   118→    }
+   119→  }, []);
+   120→
+   121→  // ---------- File upload handler (existing flow) ----------
+   122→  const handleFile = useCallback(async (file: File) => {
+   123→    const lower = file.name.toLowerCase();
+   124→    if (!lower.endsWith(".md") && !lower.endsWith(".csv")) {
+   125→      toast({
+   126→        title: "Format tidak didukung",
+   127→        description: "File harus berekstensi .md atau .csv",
+   128→        variant: "destructive",
+   129→      });
+   130→      return;
+   131→    }
+   132→    const raw = await file.text();
+   133→    const { normalizeInput } = await import("@/lib/budaya/normalize-input");
+   134→    const { mdText, format } = normalizeInput(raw, file.name);
+   135→    setFileName(file.name);
+   136→    setFileContent(mdText);
+   137→    const result = parseMd(mdText, file.name);
+   138→    setPreview({
+   139→      filename: file.name,
+   140→      tanggalList: result.tanggalList,
+   141→      rows: result.rows,
+   142→      warnings: result.warnings,
+   143→    });
+   144→    if (format === "fb") {
+   145→      toast({
+   146→        title: "Format FB scraping terdeteksi",
+   147→        description: `${result.rows.length} entri diparsing dari post FB.`,
+   148→      });
+   149→    } else if (format === "csv") {
+   150→      toast({
+   151→        title: "Format CSV scraping terdeteksi",
+   152→        description: `${result.rows.length} entri diparsing dari CSV.`,
+   153→      });
+   154→    }
+   155→  }, []);
+   156→
+   157→  const onInputChange = useCallback(
+   158→    async (e: React.ChangeEvent<HTMLInputElement>) => {
+   159→      const f = e.target.files?.[0];
+   160→      if (f) await handleFile(f);
+   161→    },
+   162→    [handleFile]
+   163→  );
+   164→
+   165→  const onDrop = useCallback(
+   166→    async (e: React.DragEvent<HTMLDivElement>) => {
+   167→      e.preventDefault();
+   168→      setIsDragging(false);
+   169→      const f = e.dataTransfer.files?.[0];
+   170→      if (f) await handleFile(f);
+   171→    },
+   172→    [handleFile]
+   173→  );
+   174→
+   175→  // ---------- OCR tab handlers ----------
+   176→  const addImages = useCallback(
+   177→    (files: FileList | File[]) => {
+   178→      const arr = Array.from(files).filter((f) => {
+   179→        const t = f.type.toLowerCase();
+   180→        return (
+   181→          t.startsWith("image/") ||
+   182→          /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)
+   183→        );
+   184→      });
+   185→      if (arr.length === 0) {
+   186→        toast({
+   187→          title: "Tidak ada gambar valid",
+   188→          description: "Format didukung: PNG, JPEG, GIF, WebP, BMP.",
+   189→          variant: "destructive",
+   190→        });
+   191→        return;
+   192→      }
+   193→      // Revoke old previews
+   194→      ocrPreviews.forEach((url) => URL.revokeObjectURL(url));
+   195→      const newPreviews = arr.map((f) => URL.createObjectURL(f));
+   196→      setOcrImages((prev) => [...prev, ...arr]);
+   197→      setOcrPreviews((prev) => [...prev, ...newPreviews]);
+   198→      // Reset previous OCR result when adding new images
+   199→      setOcrText("");
+   200→      setOcrConfidence(null);
+   201→    },
+   202→    [ocrPreviews]
+   203→  );
+   204→
+   205→  const onImageInputChange = useCallback(
+   206→    (e: React.ChangeEvent<HTMLInputElement>) => {
+   207→      if (e.target.files && e.target.files.length > 0) {
+   208→        addImages(e.target.files);
+   209→      }
+   210→      // reset so selecting the same file again still triggers change
+   211→      if (imageInputRef.current) imageInputRef.current.value = "";
+   212→    },
+   213→    [addImages]
+   214→  );
+   215→
+   216→  const onImageDrop = useCallback(
+   217→    (e: React.DragEvent<HTMLDivElement>) => {
+   218→      e.preventDefault();
+   219→      setIsDraggingImage(false);
+   220→      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+   221→        addImages(e.dataTransfer.files);
+   222→      }
+   223→    },
+   224→    [addImages]
+   225→  );
+   226→
+   227→  const removeImage = useCallback(
+   228→    (index: number) => {
+   229→      setOcrImages((prev) => prev.filter((_, i) => i !== index));
+   230→      setOcrPreviews((prev) => {
+   231→        const url = prev[index];
+   232→        if (url) URL.revokeObjectURL(url);
+   233→        return prev.filter((_, i) => i !== index);
+   234→      });
+   235→    },
+   236→    []
+   237→  );
+   238→
+   239→  const clearImages = useCallback(() => {
+   240→    ocrPreviews.forEach((url) => URL.revokeObjectURL(url));
+   241→    setOcrImages([]);
+   242→    setOcrPreviews([]);
+   243→    setOcrText("");
+   244→    setOcrConfidence(null);
+   245→    setOcrProgress(null);
+   246→  }, [ocrPreviews]);
+   247→
+   248→  const runOcrOnImages = useCallback(async () => {
+   249→    if (ocrImages.length === 0) {
+   250→      toast({
+   251→        title: "Belum ada gambar",
+   252→        description: "Tambahkan minimal 1 gambar untuk OCR.",
+   253→        variant: "destructive",
+   254→      });
+   255→      return;
+   256→    }
+   257→    setIsOcrRunning(true);
+   258→    setOcrProgress({ status: "Memulai...", progress: 0 });
+   259→    setOcrText("");
+   260→    setOcrConfidence(null);
+   261→
+   262→    try {
+   263→      const result = await runOcrBatch(ocrImages, "ind+eng", (p) => {
+   264→        setOcrProgress(p);
+   265→      });
+   266→      setOcrText(result.text);
+   267→      const avgConf =
+   268→        result.items.length > 0
+   269→          ? result.items.reduce((sum, it) => sum + it.confidence, 0) /
+   270→            result.items.length
+   271→          : 0;
+   272→      setOcrConfidence(avgConf);
+   273→
+   274→      const looksValid = looksLikeInfoLengger(result.text);
+   275→      toast({
+   276→        title: result.text.length > 0 ? "OCR selesai" : "OCR hasil kosong",
+   277→        description: `${result.items.length} gambar diproses · confidence ${avgConf.toFixed(
+   278→          1
+   279→        )}%${
+   280→          !looksValid && result.text.length > 0
+   281→            ? " · ⚠ teks tidak terdeteksi sebagai Info Lengger"
+   282→            : ""
+   283→        }`,
+   284→        variant: result.text.length > 0 ? "default" : "destructive",
+   285→      });
+   286→    } catch (err) {
+   287→      const msg = err instanceof Error ? err.message : "Unknown OCR error";
+   288→      toast({
+   289→        title: "OCR gagal",
+   290→        description: msg,
+   291→        variant: "destructive",
+   292→      });
+   293→    } finally {
+   294→      setIsOcrRunning(false);
+   295→      setOcrProgress(null);
+   296→    }
+   297→  }, [ocrImages]);
+   298→
+   299→  // Feed OCR text into the existing parser pipeline
+   300→  const useOcrAsMd = useCallback(() => {
+   301→    if (!ocrText.trim()) {
+   302→      toast({
+   303→        title: "Teks OCR kosong",
+   304→        description: "Jalankan OCR dulu atau ketik manual.",
+   305→        variant: "destructive",
+   306→      });
+   307→      return;
+   308→    }
+   309→    // Build a sensible filename from the first image name
+   310→    const baseName =
+   311→      ocrImages.length > 0
+   312→        ? ocrImages[0].name.replace(/\.[^.]+$/, "")
+   313→        : "ocr-result";
+   314→    const derivedName = `${baseName}.md`;
+   315→    setFileName(derivedName);
+   316→    setFileContent(ocrText);
+   317→    const result = parseMd(ocrText, derivedName);
+   318→    setPreview({
+   319→      filename: derivedName,
+   320→      tanggalList: result.tanggalList,
+   321→      rows: result.rows,
+   322→      warnings: result.warnings,
+   323→    });
+   324→    toast({
+   325→      title: "Teks OCR dipakai sebagai input",
+   326→      description: `${result.rows.length} entri terdeteksi. Scroll ke bawah untuk preview.`,
+   327→    });
+   328→  }, [ocrText, ocrImages]);
+   329→
+   330→  // Download OCR text as .md file — user can edit offline, then re-upload
+   331→  // via the "File .md / .csv" tab and convert to .xlsx using the existing pipeline.
+   332→  const downloadOcrAsMd = useCallback(() => {
+   333→    if (!ocrText.trim()) {
+   334→      toast({
+   335→        title: "Teks OCR kosong",
+   336→        description: "Jalankan OCR dulu atau ketik manual sebelum download.",
+   337→        variant: "destructive",
+   338→      });
+   339→      return;
+   340→    }
+   341→    // Build a sensible filename from the first image name (or fallback to "ocr-result")
+   342→    const baseName =
+   343→      ocrImages.length > 0
+   344→        ? ocrImages[0].name.replace(/\.[^.]+$/, "")
+   345→        : "ocr-result";
+   346→    const outName = `${baseName}.md`;
+   347→    const blob = new Blob([ocrText], { type: "text/markdown;charset=utf-8" });
+   348→    const url = URL.createObjectURL(blob);
+   349→    const a = document.createElement("a");
+   350→    a.href = url;
+   351→    a.download = outName;
+   352→    document.body.appendChild(a);
+   353→    a.click();
+   354→    document.body.removeChild(a);
+   355→    URL.revokeObjectURL(url);
+   356→    toast({
+   357→      title: "File .md terunduh",
+   358→      description: `${outName} (${ocrText.length.toLocaleString()} karakter). Edit di editor favoritmu, lalu upload via tab "File .md / .csv" untuk convert ke .xlsx.`,
+   359→    });
+   360→  }, [ocrText, ocrImages]);
+   361→
+   362→  // ---------- Convert & reset handlers ----------
+   363→  const onConvert = useCallback(async () => {
+   364→    if (!preview || !fileName) return;
+   365→    setIsConverting(true);
+   366→    try {
+   367→      const { generateXlsx } = await import("@/lib/budaya/xlsx-generator");
+   368→
+   369→      // If fileContent exists (from RAW): re-parse for fresh xlsx
+   370→      // If null (from Excel): use preview.rows directly (already parsed from Excel)
+   371→      let rows = preview.rows;
+   372→      let warnings: string[] = [];
+   373→      if (fileContent) {
+   374→        const { normalizeInput } = await import("@/lib/budaya/normalize-input");
+   375→        const { mdText } = normalizeInput(fileContent, fileName);
+   376→        const parsed = parseMd(mdText, fileName);
+   377→        rows = parsed.rows;
+   378→        warnings = parsed.warnings;
+   379→      }
+   380→
+   381→      if (rows.length === 0) {
+   382→        toast({
+   383→          title: "Konversi gagal",
+   384→          description: "Tidak ada entri terdeteksi. Cek format input (mis. harus ada header 'Info Lengger' atau '<n>_<lokasi>').",
+   385→          variant: "destructive",
+   386→        });
+   387→        return;
+   388→      }
+   389→
+   390→      const arrayBuffer = await generateXlsx(rows);
+   391→      const blob = new Blob([arrayBuffer], {
+   392→        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+   393→      });
+   394→
+   395→      const baseName = fileName.replace(/\.(md|csv)$/i, "");
+   396→      const outName = `${baseName}.xlsx`;
+   397→      const url = URL.createObjectURL(blob);
+   398→      const a = document.createElement("a");
+   399→      a.href = url;
+   400→      a.download = outName;
+   401→      document.body.appendChild(a);
+   402→      a.click();
+   403→      document.body.removeChild(a);
+   404→      URL.revokeObjectURL(url);
+   405→
+   406→      const warnCount = warnings.length;
+   407→      toast({
+   408→        title: "Konversi berhasil",
+   409→        description: `${rows.length} baris diproses${
+   410→          warnCount > 0 ? ` · ${warnCount} catatan` : ""
+   411→        }. File ${outName} diunduh.`,
+   412→      });
+   413→    } catch (err) {
+   414→      const msg = err instanceof Error ? err.message : "Unknown error";
+   415→      toast({
+   416→        title: "Konversi gagal",
+   417→        description: msg,
+   418→        variant: "destructive",
+   419→      });
+   420→    } finally {
+   421→      setIsConverting(false);
+   422→    }
+   423→  }, [fileContent, fileName]);
+   424→
+   425→  // Download raw-clean.md (single file, all days concatenated)
+   426→  const onDownloadRawCleanMd = useCallback(async () => {
+   427→    if (!fileContent || !fileName) return;
+   428→    setIsGeneratingMd(true);
+   429→    try {
+   430→      const { generateCleanMdSingleFile } = await import("@/lib/budaya/clean-md-generator");
+   431→      const mdText = generateCleanMdSingleFile(fileContent, fileName);
+   432→      const blob = new Blob([mdText], { type: "text/markdown;charset=utf-8" });
+   433→
+   434→      const baseName = fileName.replace(/\.(md|csv)$/i, "");
+   435→      const outName = `${baseName}-raw-clean.md`;
+   436→      const url = URL.createObjectURL(blob);
+   437→      const a = document.createElement("a");
+   438→      a.href = url;
+   439→      a.download = outName;
+   440→      document.body.appendChild(a);
+   441→      a.click();
+   442→      document.body.removeChild(a);
+   443→      URL.revokeObjectURL(url);
+   444→
+   445→      toast({
+   446→        title: "Raw clean MD terunduh",
+   447→        description: `${outName} — 1 file .md (semua tanggal, format Info Lengger standar).`,
+   448→      });
+   449→    } catch (err) {
+   450→      const msg = err instanceof Error ? err.message : "Unknown error";
+   451→      toast({
+   452→        title: "Generate raw clean MD gagal",
+   453→        description: msg,
+   454→        variant: "destructive",
+   455→      });
+   456→    } finally {
+   457→      setIsGeneratingMd(false);
+   458→    }
+   459→  }, [fileContent, fileName]);
+   460→
+   461→  // Upload edited Excel → parse → preview
+   462→  const handleExcelUpload = useCallback(async (file: File) => {
+   463→    const lower = file.name.toLowerCase();
+   464→    if (!lower.endsWith(".xlsx")) {
+   465→      toast({
+   466→        title: "Format tidak didukung",
+   467→        description: "File harus berekstensi .xlsx",
+   468→        variant: "destructive",
+   469→      });
+   470→      return;
+   471→    }
+   472→    setIsExcelParsing(true);
+   473→    try {
+   474→      const { parseXlsx } = await import("@/lib/budaya/xlsx-parser");
+   475→      const { rows, warnings } = await parseXlsx(file);
+   476→
+   477→      if (rows.length === 0) {
+   478→        toast({
+   479→          title: "Excel kosong",
+   480→          description: "Tidak ada baris data terdeteksi.",
+   481→          variant: "destructive",
+   482→        });
+   483→        return;
+   484→      }
+   485→
+   486→      setFileName(file.name);
+   487→      setFileContent(null); // Excel is binary, not text
+   488→      const tanggalList = [...new Set(rows.map((r) => r.Tanggal).filter(Boolean))] as string[];
+   489→      setPreview({
+   490→        filename: file.name,
+   491→        tanggalList,
+   492→        rows: rows as RowData[],
+   493→        warnings,
+   494→      });
+   495→
+   496→      toast({
+   497→        title: "Excel terbaca",
+   498→        description: `${rows.length} baris diparsing dari Excel.`,
+   499→      });
+   500→    } catch (err) {
+   501→      const msg = err instanceof Error ? err.message : "Unknown error";
+   502→      toast({
+   503→        title: "Baca Excel gagal",
+   504→        description: msg,
+   505→        variant: "destructive",
+   506→      });
+   507→    } finally {
+   508→      setIsExcelParsing(false);
+   509→    }
+   510→  }, []);
+   511→
+   512→  const onExcelInputChange = useCallback(
+   513→    async (e: React.ChangeEvent<HTMLInputElement>) => {
+   514→      const f = e.target.files?.[0];
+   515→      if (f) await handleExcelUpload(f);
+   516→      if (excelInputRef.current) excelInputRef.current.value = "";
+   517→    },
+   518→    [handleExcelUpload]
+   519→  );
+   520→
+   521→  // Download weekly .xlsx ZIP (1 file per ISO week, Senin-Minggu)
+   522→  const onDownloadWeeklyXlsx = useCallback(async () => {
+   523→    if (!preview || !fileName) return;
+   524→    setIsGeneratingWeekly(true);
+   525→    try {
+   526→      const { generateWeeklyXlsxZip } = await import("@/lib/budaya/weekly-xlsx-generator");
+   527→      const baseName = fileName.replace(/\.(md|csv|xlsx)$/i, "");
+   528→      const arrayBuffer = await generateWeeklyXlsxZip(preview.rows, baseName);
+   529→      const blob = new Blob([arrayBuffer], { type: "application/zip" });
+   530→      const outName = `${baseName}-weekly.zip`;
+   531→      const url = URL.createObjectURL(blob);
+   532→      const a = document.createElement("a");
+   533→      a.href = url;
+   534→      a.download = outName;
+   535→      document.body.appendChild(a);
+   536→      a.click();
+   537→      document.body.removeChild(a);
+   538→      URL.revokeObjectURL(url);
+   539→      toast({
+   540→        title: "Weekly Excel ZIP terunduh",
+   541→        description: `${outName} — 1 file .xlsx per minggu (ISO week). Edit tiap minggu, lalu upload via tab Excel.`,
+   542→      });
+   543→    } catch (err) {
+   544→      const msg = err instanceof Error ? err.message : "Unknown error";
+   545→      toast({
+   546→        title: "Generate weekly Excel gagal",
+   547→        description: msg,
+   548→        variant: "destructive",
+   549→      });
+   550→    } finally {
+   551→      setIsGeneratingWeekly(false);
+   552→    }
+   553→  }, [preview, fileName]);
+   554→
+   555→  // Download clean.md ZIP from edited Excel
+   556→  const onDownloadExcelCleanMd = useCallback(async () => {
+   557→    if (!preview || !fileName) return;
+   558→    setIsGeneratingExcelMd(true);
+   559→    try {
+   560→      const { generateCleanMdZipFromRows } = await import("@/lib/budaya/clean-md-generator");
+   561→      const arrayBuffer = await generateCleanMdZipFromRows(preview.rows, fileName);
+   562→      const blob = new Blob([arrayBuffer], { type: "application/zip" });
+   563→
+   564→      const baseName = fileName.replace(/\.xlsx$/i, "");
+   565→      const outName = `${baseName}-clean-md.zip`;
+   566→      const url = URL.createObjectURL(blob);
+   567→      const a = document.createElement("a");
+   568→      a.href = url;
+   569→      a.download = outName;
+   570→      document.body.appendChild(a);
+   571→      a.click();
+   572→      document.body.removeChild(a);
+   573→      URL.revokeObjectURL(url);
+   574→
+   575→      toast({
+   576→        title: "Clean MD ZIP terunduh",
+   577→        description: `${outName} — berisi 1 file .md per tanggal (dengan data dari Excel yang sudah diedit).`,
+   578→      });
+   579→    } catch (err) {
+   580→      const msg = err instanceof Error ? err.message : "Unknown error";
+   581→      toast({
+   582→        title: "Generate clean MD gagal",
+   583→        description: msg,
+   584→        variant: "destructive",
+   585→      });
+   586→    } finally {
+   587→      setIsGeneratingExcelMd(false);
+   588→    }
+   589→  }, [preview, fileName]);
+   590→
+   591→  const onReset = useCallback(() => {
+   592→    setFileName(null);
+   593→    setFileContent(null);
+   594→    setPreview(null);
+   595→    if (fileInputRef.current) fileInputRef.current.value = "";
+   596→    if (excelInputRef.current) excelInputRef.current.value = "";
+   597→  }, []);
+   598→
+   599→  return (
+   600→    <div className="min-h-screen flex flex-col bg-background">
+   601→      <header className="border-b bg-white sticky top-0 z-30">
+   602→        <div className="max-w-6xl mx-auto px-4 py-5 flex items-center justify-between">
+   603→          <div className="flex items-center gap-3">
+   604→            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-amber-100">
+   605→              <FileSpreadsheet className="h-5 w-5 text-amber-700" />
+   606→            </div>
+   607→            <div>
+   608→              <h1 className="text-lg font-semibold tracking-tight">
+   609→                Lengger Ledger Converter
+   610→              </h1>
+   611→              <p className="text-xs text-muted-foreground">
+   612→                Info Lengger .md/.csv/foto &rarr; Excel template (.xlsx) ·
+   613→                dengan OCR
+   614→              </p>
+   615→            </div>
+   616→          </div>
+   617→          <div className="flex items-center gap-2">
+   618→            <Badge variant="outline" className="hidden sm:inline-flex gap-1">
+   619→              <ScanText className="h-3 w-3" /> OCR
+   620→            </Badge>
+   621→            <Badge variant="outline" className="hidden sm:inline-flex">
+   622→              v2 · auto-parse + OCR
+   623→            </Badge>
+   624→            <Button
+   625→              variant="outline"
+   626→              size="sm"
+   627→              className="gap-1.5"
+   628→              onClick={() => window.open("/PLAN.md", "_blank")}
+   629→              title="Lihat plan implementasi (PLAN.md) — Cloudflare Workers + Telegram bot"
+   630→            >
+   631→              <FileText className="h-3.5 w-3.5" />
+   632→              <span className="hidden sm:inline">Plan</span>
+   633→            </Button>
+   634→            <Button
+   635→              variant="outline"
+   636→              size="sm"
+   637→              className="gap-1.5"
+   638→              onClick={onDownloadSource}
+   639→              disabled={isDownloadingSource}
+   640→              title="Download source code (.zip) — termasuk PLAN.md + worklog.md"
+   641→            >
+   642→              {isDownloadingSource ? (
+   643→                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+   644→              ) : (
+   645→                <Code2 className="h-3.5 w-3.5" />
+   646→              )}
+   647→              <span className="hidden sm:inline">Source</span>
+   648→            </Button>
+   649→          </div>
+   650→        </div>
+   651→      </header>
+   652→
+   653→      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-8 space-y-6">
+   654→        <Tabs
+   655→          value={activeTab}
+   656→          onValueChange={(v) => setActiveTab(v as "file" | "ocr" | "excel")}
+   657→        >
+   658→          <TabsList className="grid w-full max-w-lg grid-cols-3">
+   659→            <TabsTrigger value="file" className="gap-1.5">
+   660→              <FileText className="h-4 w-4" /> RAW
+   661→            </TabsTrigger>
+   662→            <TabsTrigger value="ocr" className="gap-1.5">
+   663→              <ScanText className="h-4 w-4" /> Foto OCR
+   664→            </TabsTrigger>
+   665→            <TabsTrigger value="excel" className="gap-1.5">
+   666→              <FileSpreadsheet className="h-4 w-4" /> Excel
+   667→            </TabsTrigger>
+   668→          </TabsList>
+   669→
+   670→          {/* ============ TAB 1: File upload ============ */}
+   671→          <TabsContent value="file">
+   672→            <Card>
+   673→              <CardHeader>
+   674→                <CardTitle className="text-base">
+   675→                  1. Upload file .md atau .csv
+   676→                </CardTitle>
+   677→                <CardDescription>
+   678→                  Drag &amp; drop atau klik untuk memilih. Auto-detect 3 format:
+   679→                  <strong> plain MD</strong> (Info Lengger),
+   680→                  <strong> CSV scraping</strong> (RAW IG),
+   681→                  <strong> FB scraping</strong> (
+   682→                  <code>POST #N</code> + <code>--- RAW POST ---</code>).
+   683→                  Parser otomatis mengisi: tanggal (multi-day), Jam (15:30 /
+   684→                  19:30 jika &quot;MBENGI TOK&quot;), rombongan (di-normalisasi{" "}
+   685→                  <code>&amp;</code> &rarr; <code>;</code>), lokasi, nama
+   686→                  individu &amp; peran (placeholder <code>...?</code> di-drop),
+   687→                  aktivitas_budaya, Gagrak (Sindenan/Bedhenan).
+   688→                </CardDescription>
+   689→              </CardHeader>
+   690→              <CardContent>
+   691→                <div
+   692→                  onDragOver={(e) => {
+   693→                    e.preventDefault();
+   694→                    setIsDragging(true);
+   695→                  }}
+   696→                  onDragLeave={() => setIsDragging(false)}
+   697→                  onDrop={onDrop}
+   698→                  onClick={() => fileInputRef.current?.click()}
+   699→                  className={`cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
+   700→                    isDragging
+   701→                      ? "border-amber-500 bg-amber-50"
+   702→                      : "border-muted-foreground/25 hover:border-amber-400 hover:bg-amber-50/40"
+   703→                  }`}
+   704→                >
+   705→                  <input
+   706→                    ref={fileInputRef}
+   707→                    type="file"
+   708→                    accept=".md,.csv,text/markdown,text/csv"
+   709→                    className="hidden"
+   710→                    onChange={onInputChange}
+   711→                  />
+   712→                  <div className="flex flex-col items-center gap-3">
+   713→                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+   714→                      <Upload className="h-5 w-5 text-amber-700" />
+   715→                    </div>
+   716→                    {fileName ? (
+   717→                      <div className="flex flex-col items-center gap-1">
+   718→                        <div className="flex items-center gap-2 text-sm font-medium">
+   719→                          <FileText className="h-4 w-4" />
+   720→                          {fileName}
+   721→                        </div>
+   722→                        <p className="text-xs text-muted-foreground">
+   723→                          Klik untuk ganti file
+   724→                        </p>
+   725→                      </div>
+   726→                    ) : (
+   727→                      <>
+   728→                        <p className="text-sm font-medium">
+   729→                          Drag &amp; drop file .md atau .csv di sini
+   730→                        </p>
+   731→                        <p className="text-xs text-muted-foreground">
+   732→                          atau klik untuk memilih
+   733→                        </p>
+   734→                      </>
+   735→                    )}
+   736→                  </div>
+   737→                </div>
+   738→              </CardContent>
+   739→            </Card>
+   740→          </TabsContent>
+   741→
+   742→          {/* ============ TAB 2: OCR from photo ============ */}
+   743→          <TabsContent value="ocr">
+   744→            <Card>
+   745→              <CardHeader>
+   746→                <CardTitle className="text-base flex items-center gap-2">
+   747→                  <ScanText className="h-4 w-4 text-amber-700" />
+   748→                  1. Upload foto &rarr; OCR &rarr; text
+   749→                </CardTitle>
+   750→                <CardDescription>
+   751→                  Upload 1+ foto caption Info Lengger (screenshot IG/FB).
+   752→                  OCR berjalan 100% di browser pakai{" "}
+   753→                  <strong>Tesseract.js</strong> (gratis, no API key,
+   754→                  privacy-friendly). Bahasa: Indonesian + English. Setelah
+   755→                  OCR selesai, ada 2 opsi:
+   756→                  <strong> (1) &quot;Pakai sebagai input &rarr; parse&quot;</strong>{" "}
+   757→                  untuk langsung parse ke preview tabel, atau
+   758→                  <strong> (2) &quot;Download as .md&quot;</strong> untuk simpan
+   759→                  file .md — edit offline, lalu upload ulang via tab{" "}
+   760→                  <em>&quot;File .md / .csv&quot;</em> untuk convert ke .xlsx.
+   761→                  <br />
+   762→                  <span className="text-xs text-amber-700">
+   763→                    ⚠ Saat pertama pakai, browser download language data
+   764→                    (~5MB, di-cache). Akurasi OCR ~70-90% — selalu edit hasil
+   765→                    sebelum convert.
+   766→                  </span>
+   767→                </CardDescription>
+   768→              </CardHeader>
+   769→              <CardContent className="space-y-4">
+   770→                {/* Image dropzone */}
+   771→                <div
+   772→                  onDragOver={(e) => {
+   773→                    e.preventDefault();
+   774→                    setIsDraggingImage(true);
+   775→                  }}
+   776→                  onDragLeave={() => setIsDraggingImage(false)}
+   777→                  onDrop={onImageDrop}
+   778→                  onClick={() => imageInputRef.current?.click()}
+   779→                  className={`cursor-pointer rounded-lg border-2 border-dashed p-6 text-center transition-colors ${
+   780→                    isDraggingImage
+   781→                      ? "border-amber-500 bg-amber-50"
+   782→                      : "border-muted-foreground/25 hover:border-amber-400 hover:bg-amber-50/40"
+   783→                  }`}
+   784→                >
+   785→                  <input
+   786→                    ref={imageInputRef}
+   787→                    type="file"
+   788→                    accept="image/*,.png,.jpg,.jpeg,.gif,.webp,.bmp"
+   789→                    multiple
+   790→                    className="hidden"
+   791→                    onChange={onImageInputChange}
+   792→                  />
+   793→                  <div className="flex flex-col items-center gap-2">
+   794→                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-100">
+   795→                      <ImageIcon className="h-5 w-5 text-amber-700" />
+   796→                    </div>
+   797→                    <p className="text-sm font-medium">
+   798→                      Drag &amp; drop 1+ foto di sini
+   799→                    </p>
+   800→                    <p className="text-xs text-muted-foreground">
+   801→                      atau klik untuk pilih · PNG / JPG / WebP / BMP / GIF ·
+   802→                      multi-image supported
+   803→                    </p>
+   804→                  </div>
+   805→                </div>
+   806→
+   807→                {/* Image thumbnails */}
+   808→                {ocrImages.length > 0 && (
+   809→                  <div className="flex flex-wrap gap-3 items-start">
+   810→                    {ocrPreviews.map((url, i) => (
+   811→                      <div
+   812→                        key={i}
+   813→                        className="relative group rounded-md border overflow-hidden bg-muted/30"
+   814→                      >
+   815→                        {/* Using native <img> for blob URL preview — Next Image not needed here */}
+   816→                        <img
+   817→                          src={url}
+   818→                          alt={ocrImages[i].name}
+   819→                          className="h-24 w-24 object-cover"
+   820→                        />
+   821→                        <button
+   822→                          type="button"
+   823→                          onClick={(e) => {
+   824→                            e.stopPropagation();
+   825→                            removeImage(i);
+   826→                          }}
+   827→                          className="absolute top-1 right-1 rounded-full bg-black/60 text-white p-0.5 hover:bg-black/80 transition"
+   828→                          aria-label={`Hapus gambar ${i + 1}`}
+   829→                        >
+   830→                          <X className="h-3 w-3" />
+   831→                        </button>
+   832→                        <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[10px] px-1 py-0.5 truncate">
+   833→                          {ocrImages[i].name}
+   834→                        </div>
+   835→                      </div>
+   836→                    ))}
+   837→                    <Button
+   838→                      variant="ghost"
+   839→                      size="sm"
+   840→                      onClick={clearImages}
+   841→                      className="gap-1.5 text-xs"
+   842→                    >
+   843→                      <RotateCcw className="h-3 w-3" /> Clear all
+   844→                    </Button>
+   845→                  </div>
+   846→                )}
+   847→
+   848→                {/* Run OCR button */}
+   849→                {ocrImages.length > 0 && (
+   850→                  <div className="flex flex-wrap items-center gap-3">
+   851→                    <Button
+   852→                      onClick={runOcrOnImages}
+   853→                      disabled={isOcrRunning}
+   854→                      className="gap-2"
+   855→                    >
+   856→                      {isOcrRunning ? (
+   857→                        <Loader2 className="h-4 w-4 animate-spin" />
+   858→                      ) : (
+   859→                        <Sparkles className="h-4 w-4" />
+   860→                      )}
+   861→                      {isOcrRunning
+   862→                        ? "Menjalankan OCR..."
+   863→                        : `Run OCR (${ocrImages.length} gambar)`}
+   864→                    </Button>
+   865→                    {ocrConfidence !== null && ocrConfidence > 0 && (
+   866→                      <Badge variant="outline" className="text-xs">
+   867→                        Confidence: {ocrConfidence.toFixed(1)}%
+   868→                      </Badge>
+   869→                    )}
+   870→                  </div>
+   871→                )}
+   872→
+   873→                {/* OCR progress bar */}
+   874→                {isOcrRunning && ocrProgress && (
+   875→                  <div className="space-y-1.5">
+   876→                    <div className="flex justify-between text-xs text-muted-foreground">
+   877→                      <span className="truncate pr-3">{ocrProgress.status}</span>
+   878→                      <span>{(ocrProgress.progress * 100).toFixed(0)}%</span>
+   879→                    </div>
+   880→                    <Progress
+   881→                      value={ocrProgress.progress * 100}
+   882→                      className="h-2"
+   883→                    />
+   884→                  </div>
+   885→                )}
+   886→
+   887→                {/* OCR result textarea */}
+   888→                {ocrText && !isOcrRunning && (
+   889→                  <div className="space-y-2">
+   890→                    <div className="flex items-center justify-between">
+   891→                      <label className="text-sm font-medium">
+   892→                        2. Hasil OCR (editable)
+   893→                      </label>
+   894→                      <span className="text-xs text-muted-foreground">
+   895→                        Perbaiki dulu sebelum dipakai sebagai input parser
+   896→                      </span>
+   897→                    </div>
+   898→                    <Textarea
+   899→                      value={ocrText}
+   900→                      onChange={(e) => setOcrText(e.target.value)}
+   901→                      rows={12}
+   902→                      className="font-mono text-xs leading-relaxed"
+   903→                      placeholder="Hasil OCR akan muncul di sini..."
+   904→                    />
+   905→                    <div className="flex flex-wrap items-center gap-3">
+   906→                      <Button
+   907→                        onClick={useOcrAsMd}
+   908→                        className="gap-2"
+   909→                      >
+   910→                        <CheckCircle2 className="h-4 w-4" />
+   911→                        Pakai sebagai input &rarr; parse
+   912→                      </Button>
+   913→                      <Button
+   914→                        onClick={downloadOcrAsMd}
+   915→                        variant="outline"
+   916→                        className="gap-2"
+   917→                        title="Download hasil OCR sebagai file .md — bisa di-edit offline lalu di-upload ulang via tab File"
+   918→                      >
+   919→                        <Download className="h-4 w-4" />
+   920→                        Download as .md
+   921→                      </Button>
+   922→                      {!looksLikeInfoLengger(ocrText) && (
+   923→                        <span className="text-xs text-amber-700 inline-flex items-center gap-1">
+   924→                          <AlertTriangle className="h-3.5 w-3.5" />
+   925→                          Teks tidak terdeteksi sebagai Info Lengger
+   926→                          (tapi tetap bisa dipakai)
+   927→                        </span>
+   928→                      )}
+   929→                    </div>
+   930→                    <p className="text-xs text-muted-foreground">
+   931→                      💡 <strong>Tip:</strong> Klik <strong>Download as .md</strong>{" "}
+   932→                      untuk simpan hasil OCR sebagai file .md. Edit di editor
+   933→                      favoritmu (VS Code, Notepad, dll.), lalu upload via tab{" "}
+   934→                      <strong>&quot;File .md / .csv&quot;</strong> di atas untuk
+   935→                      convert ke .xlsx lewat pipeline yang sudah jalan.
+   936→                    </p>
+   937→                  </div>
+   938→                )}
+   939→              </CardContent>
+   940→            </Card>
+   941→          </TabsContent>
+   942→
+   943→          {/* ============ TAB 3: Upload Excel (edited) ============ */}
+   944→          <TabsContent value="excel">
+   945→            <Card>
+   946→              <CardHeader>
+   947→                <CardTitle className="text-base flex items-center gap-2">
+   948→                  <FileSpreadsheet className="h-4 w-4 text-amber-700" />
+   949→                  Upload Excel yang sudah diedit
+   950→                </CardTitle>
+   951→                <CardDescription>
+   952→                  Upload file <code>.xlsx</code> yang sudah Anda edit (isi peristiwa,
+   953→                  kategori, bukti dari flyer). Parser akan baca Excel kembali dan
+   954→                  generate clean.md ZIP dengan data yang sudah lengkap.
+   955→                  <br />
+   956→                  <span className="text-xs text-amber-700">
+   957→                    Workflow: RAW &rarr; Excel (auto) &rarr; edit Excel (manual, isi dari flyer)
+   958→                    &rarr; upload Excel &rarr; clean.md ZIP (dengan data lengkap)
+   959→                  </span>
+   960→                </CardDescription>
+   961→              </CardHeader>
+   962→              <CardContent>
+   963→                <div
+   964→                  onClick={() => excelInputRef.current?.click()}
+   965→                  className="cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors border-muted-foreground/25 hover:border-amber-400 hover:bg-amber-50/40"
+   966→                >
+   967→                  <input
+   968→                    ref={excelInputRef}
+   969→                    type="file"
+   970→                    accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+   971→                    className="hidden"
+   972→                    onChange={onExcelInputChange}
+   973→                  />
+   974→                  <div className="flex flex-col items-center gap-3">
+   975→                    <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+   976→                      {isExcelParsing ? (
+   977→                        <Loader2 className="h-5 w-5 text-amber-700 animate-spin" />
+   978→                      ) : (
+   979→                        <FileSpreadsheet className="h-5 w-5 text-amber-700" />
+   980→                      )}
+   981→                    </div>
+   982→                    {isExcelParsing ? (
+   983→                      <p className="text-sm font-medium">Membaca Excel...</p>
+   984→                    ) : fileName && activeTab === "excel" ? (
+   985→                      <div className="flex flex-col items-center gap-1">
+   986→                        <div className="flex items-center gap-2 text-sm font-medium">
+   987→                          <FileSpreadsheet className="h-4 w-4" />
+   988→                          {fileName}
+   989→                        </div>
+   990→                        <p className="text-xs text-muted-foreground">
+   991→                          Klik untuk ganti file
+   992→                        </p>
+   993→                      </div>
+   994→                    ) : (
+   995→                      <>
+   996→                        <p className="text-sm font-medium">
+   997→                          Drag &amp; drop file .xlsx di sini
+   998→                        </p>
+   999→                        <p className="text-xs text-muted-foreground">
+  1000→                          atau klik untuk memilih
+  1001→                        </p>
+  1002→                      </>
+  1003→                    )}
+  1004→                  </div>
+  1005→                </div>
+  1006→              </CardContent>
+  1007→            </Card>
+  1008→          </TabsContent>
+  1009→        </Tabs>
+  1010→
+  1011→        {/* ============ Shared preview ============ */}
+  1012→        {preview && (
+  1013→          <Card>
+  1014→            <CardHeader>
+  1015→              <CardTitle className="text-base">
+  1016→                {preview.filename ? "2" : "2"}. Preview hasil parsing
+  1017→              </CardTitle>
+  1018→              <CardDescription>
+  1019→                <span className="font-medium">{preview.filename}</span> ·{" "}
+  1020→                {preview.rows.length} baris terdeteksi
+  1021→                {preview.tanggalList.length > 0
+  1022→                  ? ` · tanggal: ${preview.tanggalList.join(", ")}`
+  1023→                  : ""}
+  1024→                . Periksa sebelum export, lalu klik tombol di bawah.
+  1025→              </CardDescription>
+  1026→            </CardHeader>
+  1027→            <CardContent className="space-y-4">
+  1028→              {preview.warnings.length > 0 && (
+  1029→                <Alert variant="default" className="border-amber-300 bg-amber-50">
+  1030→                  <AlertTriangle className="h-4 w-4 text-amber-700" />
+  1031→                  <AlertTitle className="text-amber-900">
+  1032→                    {preview.warnings.length} catatan parsing
+  1033→                  </AlertTitle>
+  1034→                  <AlertDescription className="text-amber-900">
+  1035→                    <ul className="list-disc pl-5 mt-1 text-xs space-y-0.5 max-h-40 overflow-y-auto">
+  1036→                      {preview.warnings.map((w, i) => (
+  1037→                        <li key={i}>{w}</li>
+  1038→                      ))}
+  1039→                    </ul>
+  1040→                  </AlertDescription>
+  1041→                </Alert>
+  1042→              )}
+  1043→
+  1044→              <div className="max-h-[32rem] overflow-auto rounded-md border">
+  1045→                <table className="min-w-full text-[11px] whitespace-nowrap">
+  1046→                  <thead className="bg-muted/40 sticky top-0 z-10">
+  1047→                    <tr>
+  1048→                      <th className="px-2 py-1.5 text-left font-medium border-b sticky left-0 bg-muted/60 z-20">#</th>
+  1049→                      <th className="px-2 py-1.5 text-left font-medium border-b">Tanggal</th>
+  1050→                      <th className="px-2 py-1.5 text-left font-medium border-b">TanggalSelesai</th>
+  1051→                      <th className="px-2 py-1.5 text-left font-medium border-b">Jam</th>
+  1052→                      <th className="px-2 py-1.5 text-left font-medium border-b">peristiwa</th>
+  1053→                      <th className="px-2 py-1.5 text-left font-medium border-b">Kategori</th>
+  1054→                      <th className="px-2 py-1.5 text-left font-medium border-b">aktivitas_budaya</th>
+  1055→                      <th className="px-2 py-1.5 text-left font-medium border-b">Gagrak</th>
+  1056→                      <th className="px-2 py-1.5 text-left font-medium border-b">nama_rombongan</th>
+  1057→                      <th className="px-2 py-1.5 text-left font-medium border-b">Peran_Rombongan</th>
+  1058→                      <th className="px-2 py-1.5 text-left font-medium border-b">nama_individu</th>
+  1059→                      <th className="px-2 py-1.5 text-left font-medium border-b">peran_individu</th>
+  1060→                      <th className="px-2 py-1.5 text-left font-medium border-b">sumber</th>
+  1061→                      <th className="px-2 py-1.5 text-left font-medium border-b">bukti</th>
+  1062→                      <th className="px-2 py-1.5 text-left font-medium border-b">Lokasi</th>
+  1063→                      <th className="px-2 py-1.5 text-left font-medium border-b">nama_dusun/kampung</th>
+  1064→                      <th className="px-2 py-1.5 text-left font-medium border-b">nama_desa/Kelurahan</th>
+  1065→                      <th className="px-2 py-1.5 text-left font-medium border-b">kode_desa</th>
+  1066→                      <th className="px-2 py-1.5 text-left font-medium border-b">Nama_Kecamatan</th>
+  1067→                      <th className="px-2 py-1.5 text-left font-medium border-b">kode_kecamatan</th>
+  1068→                      <th className="px-2 py-1.5 text-left font-medium border-b">nama_kabupaten</th>
+  1069→                      <th className="px-2 py-1.5 text-left font-medium border-b">kode_kabupaten</th>
+  1070→                      <th className="px-2 py-1.5 text-left font-medium border-b">nama_provinsi</th>
+  1071→                      <th className="px-2 py-1.5 text-left font-medium border-b">tipe_sumber</th>
+  1072→                      <th className="px-2 py-1.5 text-left font-medium border-b">tanggal_capture</th>
+  1073→                      <th className="px-2 py-1.5 text-left font-medium border-b">tingkat_verifikasi</th>
+  1074→                      <th className="px-2 py-1.5 text-left font-medium border-b">status_consent</th>
+  1075→                      <th className="px-2 py-1.5 text-left font-medium border-b">kelengkapan</th>
+  1076→                      <th className="px-2 py-1.5 text-left font-medium border-b">catatan_gap</th>
+  1077→                      <th className="px-2 py-1.5 text-left font-medium border-b">catatan</th>
+  1078→                    </tr>
+  1079→                  </thead>
+  1080→                  <tbody>
+  1081→                    {preview.rows.map((r, i) => {
+  1082→                      const empty = (v?: string | null) =>
+  1083→                        v ? (
+  1084→                          v
+  1085→                        ) : (
+  1086→                          <span className="text-muted-foreground italic">—</span>
+  1087→                        );
+  1088→                      return (
+  1089→                        <tr key={i} className="hover:bg-muted/30 even:bg-muted/10">
+  1090→                          <td className="px-2 py-1.5 border-b align-top sticky left-0 bg-background z-10">{i + 1}</td>
+  1091→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Tanggal)}</td>
+  1092→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.TanggalSelesai)}</td>
+  1093→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Jam)}</td>
+  1094→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.peristiwa)}</td>
+  1095→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Kategori)}</td>
+  1096→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.aktivitas_budaya)}</td>
+  1097→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Gagrak)}</td>
+  1098→                          <td className="px-2 py-1.5 border-b align-top max-w-[20rem] overflow-hidden text-ellipsis">{empty(r.nama_rombongan)}</td>
+  1099→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Peran_Rombongan)}</td>
+  1100→                          <td className="px-2 py-1.5 border-b align-top max-w-[20rem] overflow-hidden text-ellipsis">{empty(r.nama_individu)}</td>
+  1101→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.peran_individu)}</td>
+  1102→                          <td className="px-2 py-1.5 border-b align-top max-w-[18rem] overflow-hidden text-ellipsis" title={r.sumber ?? ""}>
+  1103→                            {r.sumber ? (
+  1104→                              <span className="text-muted-foreground">{r.sumber.slice(0, 50)}{r.sumber.length > 50 ? "…" : ""}</span>
+  1105→                            ) : (
+  1106→                              <span className="text-muted-foreground italic">—</span>
+  1107→                            )}
+  1108→                          </td>
+  1109→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.bukti)}</td>
+  1110→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Lokasi)}</td>
+  1111→                          <td className="px-2 py-1.5 border-b align-top">{empty(r["nama_dusun/kampung"])}</td>
+  1112→                          <td className="px-2 py-1.5 border-b align-top">{empty(r["nama_desa/Kelurahan"])}</td>
+  1113→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.kode_desa)}</td>
+  1114→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.Nama_Kecamatan)}</td>
+  1115→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.kode_kecamatan)}</td>
+  1116→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.nama_kabupaten)}</td>
+  1117→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.kode_kabupaten)}</td>
+  1118→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.nama_provinsi)}</td>
+  1119→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.tipe_sumber)}</td>
+  1120→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.tanggal_capture)}</td>
+  1121→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.tingkat_verifikasi)}</td>
+  1122→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.status_consent)}</td>
+  1123→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.kelengkapan)}</td>
+  1124→                          <td className="px-2 py-1.5 border-b align-top max-w-[20rem] overflow-hidden text-ellipsis">{empty(r.catatan_gap)}</td>
+  1125→                          <td className="px-2 py-1.5 border-b align-top">{empty(r.catatan)}</td>
+  1126→                        </tr>
+  1127→                      );
+  1128→                    })}
+  1129→                  </tbody>
+  1130→                </table>
+  1131→              </div>
+  1132→
+  1133→              <div className="flex flex-wrap gap-3 items-center">
+  1134→                <Button onClick={onConvert} disabled={isConverting} className="gap-2">
+  1135→                  {isConverting ? (
+  1136→                    <Loader2 className="h-4 w-4 animate-spin" />
+  1137→                  ) : (
+  1138→                    <Download className="h-4 w-4" />
+  1139→                  )}
+  1140→                  {isConverting ? "Mengonversi..." : "Convert & download .xlsx"}
+  1141→                </Button>
+  1142→                <Button
+  1143→                  onClick={onDownloadWeeklyXlsx}
+  1144→                  disabled={isGeneratingWeekly}
+  1145→                  variant="outline"
+  1146→                  className="gap-2"
+  1147→                  title="Download ZIP berisi 1 .xlsx per minggu (ISO week, Senin-Minggu)"
+  1148→                >
+  1149→                  {isGeneratingWeekly ? (
+  1150→                    <Loader2 className="h-4 w-4 animate-spin" />
+  1151→                  ) : (
+  1152→                    <Download className="h-4 w-4" />
+  1153→                  )}
+  1154→                  {isGeneratingWeekly ? "Generating..." : "Weekly .xlsx ZIP"}
+  1155→                </Button>
+  1156→                {fileContent && (
+  1157→                  <Button
+  1158→                    onClick={onDownloadRawCleanMd}
+  1159→                    disabled={isGeneratingMd}
+  1160→                    variant="outline"
+  1161→                    className="gap-2"
+  1162→                    title="Download raw clean.md (1 file, semua tanggal, format standar)"
+  1163→                  >
+  1164→                    {isGeneratingMd ? (
+  1165→                      <Loader2 className="h-4 w-4 animate-spin" />
+  1166→                    ) : (
+  1167→                      <FileText className="h-4 w-4" />
+  1168→                    )}
+  1169→                    {isGeneratingMd ? "Generating..." : "Download raw-clean.md"}
+  1170→                  </Button>
+  1171→                )}
+  1172→                <Button
+  1173→                  onClick={onDownloadExcelCleanMd}
+  1174→                  disabled={isGeneratingExcelMd}
+  1175→                  variant="outline"
+  1176→                  className="gap-2"
+  1177→                  title="Download clean.md ZIP (1 file per tanggal, dengan data dari Excel/source)"
+  1178→                >
+  1179→                  {isGeneratingExcelMd ? (
+  1180→                    <Loader2 className="h-4 w-4 animate-spin" />
+  1181→                  ) : (
+  1182→                    <Download className="h-4 w-4" />
+  1183→                  )}
+  1184→                  {isGeneratingExcelMd ? "Generating..." : "Download clean.md ZIP"}
+  1185→                </Button>
+  1186→                <Button variant="outline" onClick={onReset} className="gap-2">
+  1187→                  <RotateCcw className="h-4 w-4" />
+  1188→                  Reset
+  1189→                </Button>
+  1190→                <span className="text-xs text-muted-foreground ml-auto inline-flex items-center gap-1.5">
+  1191→                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+  1192→                  Kolom <code>TanggalSelesai</code>, <code>peristiwa</code>,{" "}
+  1193→                  <code>Kategori</code>, <code>bukti</code>, <code>catatan</code>{" "}
+  1194→                  dikosongkan untuk diisi manual.
+  1195→                </span>
+  1196→              </div>
+  1197→            </CardContent>
+  1198→          </Card>
+  1199→        )}
+  1200→
+  1201→        {!preview && (
+  1202→          <Card className="border-dashed">
+  1203→            <CardContent className="pt-6 text-sm text-muted-foreground space-y-3">
+  1204→              <p className="font-medium text-foreground">
+  1205→                Pilih sumber input di atas:
+  1206→              </p>
+  1207→              <ul className="list-disc pl-5 text-xs space-y-1.5">
+  1208→                <li>
+  1209→                  <strong>Tab &quot;File .md / .csv&quot;</strong> — upload file
+  1210→                  teks Info Lengger (single/multi-day, CSV scraping IG, atau FB
+  1211→                  scraping dengan <code>POST #N</code>).
+  1212→                </li>
+  1213→                <li>
+  1214→                  <strong>Tab &quot;Foto &rarr; OCR&quot;</strong> — upload 1+
+  1215→                  foto caption Info Lengger, OCR ke text, edit hasil, lalu
+  1216→                  pakai sebagai input parser. Bahasa Indonesian + English.
+  1217→                </li>
+  1218→              </ul>
+  1219→
+  1220→              <div className="space-y-2 pt-2">
+  1221→                <p className="font-medium text-foreground">
+  1222→                  Format input teks (file atau hasil OCR) yang didukung:
+  1223→                </p>
+  1224→
+  1225→                <div className="space-y-2">
+  1226→                  <p><strong>1. Plain MD</strong> — Info Lengger .md (single atau multi-day):</p>
+  1227→                  <pre className="bg-muted/40 p-3 rounded-md text-[11px] overflow-x-auto leading-relaxed">{`Info Lengger Sabtu, 20 Juni 2026
+  1228→1_Trenggiling, Sariyoso Kec/Kab: Wonosobo
+  1229→(Romb Trenggono Sari Budoyo)
+  1230→Lengger: Bu Ezti, Fathma & Mayssi Della
+  1231→
+  1232→Info Lengger Minggu, 21 Juni 2026
+  1233→1_Kasemen, Tlogomulyo Kec: Kertek Kab: Wonosobo
+  1234→(Romb Agung Budoyo)
+  1235→Lengger: Bu Dian, Gisha, Sani & Ayuk (Temanggung)`}</pre>
+  1236→                </div>
+  1237→
+  1238→                <div className="space-y-2">
+  1239→                  <p><strong>Aturan khusus parser:</strong></p>
+  1240→                  <ul className="list-disc pl-5 text-xs space-y-1">
+  1241→                    <li><code>MBENGI TOK</code> / <code>MBENGI THOK</code> &rarr; Jam = <code>19:30</code> (sesi malam saja). Default tanpa marker = <code>15:30</code> (pasca Asar).</li>
+  1242→                    <li>Rombongan dengan <code>&amp;</code> (multiple groups) &rarr; di-normalisasi jadi <code>;</code>.</li>
+  1243→                    <li>Individu placeholder <code>...?</code> / <code>Bu ...?</code> / <code>...</code> &rarr; di-drop (kosong).</li>
+  1244→                    <li>Gagrak: Pentas Lengger + Sinden &rarr; <code>Sindenan</code>. Pentas Lengger tanpa Sinden &rarr; <code>Bedhenan</code>. Non-Lengger (Tayub/Warok/Jaranan/Topeng Ireng) &rarr; kosong.</li>
+  1245→                    <li>Baris <code>Sumber : ...</code> di mana saja di MD &rarr; mengisi kolom <code>sumber</code> untuk semua baris di section itu.</li>
+  1246→                    <li>Multi-day: tiap header <code>Info Lengger &lt;date&gt;</code> men-set tanggal untuk entri di bawahnya sampai header berikutnya.</li>
+  1247→                  </ul>
+  1248→                </div>
+  1249→
+  1250→                <div className="space-y-2 pt-2">
+  1251→                  <p className="font-medium text-foreground">Tentang OCR (Tesseract.js):</p>
+  1252→                  <ul className="list-disc pl-5 text-xs space-y-1">
+  1253→                    <li>100% client-side — tidak ada foto yang dikirim ke server.</li>
+  1254→                    <li>Bahasa: Indonesian + English (default, cocok untuk caption IG/FB).</li>
+  1255→                    <li>Saat pertama pakai, browser download language data ~5MB (di-cache untuk pakai berikutnya).</li>
+  1256→                    <li>Akurasi OCR tergantung kualitas foto. Selalu edit hasil sebelum convert ke .xlsx.</li>
+  1257→                    <li>Multi-image: upload beberapa foto sekaligus, hasil OCR digabung otomatis.</li>
+  1258→                  </ul>
+  1259→                </div>
+  1260→              </div>
+  1261→            </CardContent>
+  1262→          </Card>
+  1263→        )}
+  1264→      </main>
+  1265→
+  1266→      <footer className="border-t bg-white mt-auto">
+  1267→        <div className="max-w-6xl mx-auto px-4 py-4 text-xs text-muted-foreground flex flex-col sm:flex-row gap-2 justify-between">
+  1268→          <span>
+  1269→            Lengger Ledger Converter + OCR · auto-parse md/csv/fb/foto &rarr;
+  1270→            xlsx
+  1271→          </span>
+  1272→          <span>Built with Next.js · ExcelJS · Tesseract.js</span>
+  1273→        </div>
+  1274→      </footer>
+  1275→    </div>
+  1276→  );
+  1277→}
+  1278→

@@ -1,0 +1,832 @@
+     1→/**
+     2→ * Parser for "Info Lengger" markdown files.
+     3→ *
+     4→ * Supports three input formats (auto-detected by normalize-input.ts):
+     5→ *   1. Plain MD         — Info Lengger .md (single or multi-day)
+     6→ *   2. CSV scraping     — each row's first column = 1 post (multi-line OK)
+     7→ *   3. FB scraping MD   — has `POST #N` + `--- RAW POST ---` blocks
+     8→ *
+     9→ * After normalization, all three become MD-equivalent text that this parser
+    10→ * handles uniformly.
+    11→ *
+    12→ * Features:
+    13→ *   - Multi-day source: multiple "Info Lengger <Day>, DD Month YYYY" headers
+    14→ *     throughout the file. Each entry inherits the date from the nearest
+    15→ *     "Info Lengger" header above it.
+    16→ *   - "MBENGI TOK" / "MBENGI THOK" detection: sets Jam = "19:30" (evening only).
+    17→ *     Default (no MBENGI TOK) = "15:30" (afternoon, after Asar).
+    18→ *   - Rombongan normalization: "X & Y" → "X; Y" (multiple groups separator).
+    19→ *   - Individual name filtering: drops tokens containing "..." (placeholder for
+    20→ *     unknown name, e.g. "...?", "Bu ...?") and tokens with no letters.
+    21→ *   - Gagrak rules: Pentas Lengger w/ Sinden → "Sindenan", w/o Sinden →
+    22→ *     "Bedhenan". Non-Lengger activities → Gagrak left empty.
+    23→ *   - "Sumber :" line detection (anywhere in MD) → fills sumber column for all rows.
+    24→ *   - "-----" separator → ignored.
+    25→ *   - Special activities: "TAYUB", "WAROK", "JARANAN & WAROK",
+    26→ *     "TOPENG IRENG & WAROK", "LENGGERAN, JARANAN & WAROK".
+    27→ */
+    28→
+    29→import { RowData, DEFAULT_PROVINSI } from "./template";
+    30→export type { RowData } from "./template";
+    31→import { lookupKabupaten, lookupKecamatan, lookupDesa } from "../data/wilayah/wilayah-lookup";
+    32→
+    33→export interface ParseResult {
+    34→  /** All unique dates detected across the source file (multi-day support). */
+    35→  tanggalList: string[];
+    36→  rows: RowData[];
+    37→  warnings: string[];
+    38→}
+    39→
+    40→/** Parse Indonesian month name → number (1-12). */
+    41→const MONTHS: Record<string, number> = {
+    42→  januari: 1, februari: 2, maret: 3, april: 4, mei: 5, juni: 6,
+    43→  juli: 7, agustus: 8, september: 9, oktober: 10, november: 11, desember: 12,
+    44→};
+    45→
+    46→/** Parse "DD Month YYYY" → "YYYY-MM-DD". Returns null if no match. */
+    47→function parseDateStr(text: string): string | null {
+    48→  const m = text.match(/(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/);
+    49→  if (!m) return null;
+    50→  const day = m[1].padStart(2, "0");
+    51→  const mon = MONTHS[m[2].toLowerCase()];
+    52→  const year = m[3];
+    53→  if (!mon) return null;
+    54→  return `${year}-${String(mon).padStart(2, "0")}-${day}`;
+    55→}
+    56→
+    57→/**
+    58→ * Try to detect date from the first "Info Lengger ..." line or filename.
+    59→ * (Used only as fallback; for multi-day sources, dates come from per-section
+    60→ * "Info Lengger" headers throughout the file.)
+    61→ */
+    62→export function detectTanggal(mdText: string, filename?: string): string | null {
+    63→  const firstLine = mdText.split(/\r?\n/, 1)[0] || "";
+    64→  const parsed = parseDateStr(firstLine);
+    65→  if (parsed) return parsed;
+    66→  if (filename) {
+    67→    const fm = filename.match(/(\d{4})-(\d{2})-(\d{2})/);
+    68→    if (fm) return `${fm[1]}-${fm[2]}-${fm[3]}`;
+    69→  }
+    70→  return null;
+    71→}
+    72→
+    73→interface ParsedLocation {
+    74→  lokasi: string | null;
+    75→  dusun: string | null;
+    76→  desa: string | null;
+    77→  kec: string | null;
+    78→  kab: string | null;
+    79→  prov: string | null;
+    80→}
+    81→
+    82→/**
+    83→ * Venue-type keywords that indicate a part is a specific location (lokasi)
+    84→ * rather than a dusun/desa name. e.g. "Halaman Terminal Kalibeber",
+    85→ * "Lapangan Desa Kejajar", "Pendopo Kabupaten".
+    86→ *
+    87→ * Uses word boundaries to avoid false positives like "Gunungsari" (desa name
+    88→ * that contains "gunung" as a substring but not as a whole word).
+    89→ */
+    90→const VENUE_KEYWORDS =
+    91→  /\b(terminal|lapangan|halaman|pendopo|alun[-\s]?alun|gedung|sekolah|masjid|gereja|pasar|jembatan|balai|aula|stadion|gor|kompleks|pabrik|rs\b|rumah\s+sakit|puskesmas|koramil|polsek|polres|perumahan|area\b|pantai|bukit|jalan|jl\.?)\b/i;
+    92→
+    93→interface PartInfo {
+    94→  /** Cleaned text (prefix stripped). */
+    95→  text: string;
+    96→  /** True if part had "Dk."/"Dukuh" prefix → dusun. */
+    97→  isDusun: boolean;
+    98→  /** True if part had "Ds."/"Desa" prefix → desa. */
+    99→  isDesa: boolean;
+   100→  /** True if part contains a venue keyword → lokasi. */
+   101→  isVenue: boolean;
+   102→}
+   103→
+   104→/**
+   105→ * Parse a single entry header (e.g. "1_Trenggiling, Sariyoso Kec/Kab: Wonosobo")
+   106→ * into structured location fields.
+   107→ *
+   108→ * Hybrid detection strategy (priority high → low):
+   109→ *   1. Explicit prefix: "Dk."/"Dukuh" → dusun; "Ds."/"Desa" → desa.
+   110→ *      Prefix is stripped, clean name kept.
+   111→ *   2. Venue keyword: "Terminal", "Lapangan", "Halaman", etc. → lokasi.
+   112→ *   3. Count-based fallback (right-aligned to desa, then dusun):
+   113→ *        1 part  → desa
+   114→ *        2 parts → dusun + desa
+   115→ *        3 parts → dusun + desa + (rest → lokasi)
+   116→ *
+   117→ * This implements the user's rules:
+   118→ *   - 5 data (ideal): lokasi, dusun, desa, kec, kab
+   119→ *   - 4 data: dusun, desa, kec, kab (lokasi empty)
+   120→ *   - 3 data: desa, kec, kab (lokasi & dusun empty)
+   121→ *   - Specific venue ("Terminal Kalibeber"): lokasi + remaining
+   122→ */
+   123→function parseHeader(header: string): ParsedLocation {
+   124→  const m = header.match(/^\d+_(.*)$/);
+   125→  let body = m ? m[1] : header;
+   126→
+   127→  let kec: string | null = null;
+   128→  let kab: string | null = null;
+   129→  let prov: string | null = null;
+   130→
+   131→  // Extract Prov: (if present) — capture multi-word up to end of line
+   132→  const mProv = body.match(/Prov:\s*(.+?)(?:\s*$)/i);
+   133→  if (mProv) {
+   134→    prov = mProv[1].trim();
+   135→  }
+   136→
+   137→  // Extract kec & kab from markers — capture multi-word up to next marker
+   138→  const mKecKab = body.match(/Kec\/Kab:\s*(.+?)(?=\s*Kab:|\s*Prov:|$)/i);
+   139→  if (mKecKab) {
+   140→    // Combined marker: kec = kab = same value
+   141→    kec = mKecKab[1].trim();
+   142→    kab = kec;
+   143→    body = body.slice(0, mKecKab.index).trim();
+   144→  } else {
+   145→    // Capture kecamatan up to Kab: or Prov: or end
+   146→    const mKec = body.match(/Kec:\s*(.+?)(?=\s*Kab:|\s*Prov:|$)/i);
+   147→    // Capture kabupaten up to Prov: or end
+   148→    const mKab = body.match(/Kab:\s*(.+?)(?=\s*Prov:|$)/i);
+   149→    if (mKec) kec = mKec[1].trim();
+   150→    if (mKab) kab = mKab[1].trim();
+   151→    const starts: number[] = [];
+   152→    if (mKec && mKec.index !== undefined) starts.push(mKec.index);
+   153→    if (mKab && mKab.index !== undefined) starts.push(mKab.index);
+   154→    if (starts.length > 0) {
+   155→      body = body.slice(0, Math.min(...starts)).trim();
+   156→    }
+   157→  }
+   158→
+   159→  // Clean trailing commas/whitespace, split into parts
+   160→  body = body.replace(/,+$/, "").trim();
+   161→  const parts = body.split(",").map((p) => p.trim()).filter(Boolean);
+   162→
+   163→  // Analyze each part: detect prefix & venue keyword
+   164→  const infos: PartInfo[] = parts.map((p) => {
+   165→    const lower = p.toLowerCase();
+   166→    let isDusun = false;
+   167→    let isDesa = false;
+   168→    let text = p;
+   169→
+   170→    if (lower.startsWith("dk.") || lower.startsWith("dukuh ")) {
+   171→      isDusun = true;
+   172→      text = p.replace(/^dk\.\s*/i, "").replace(/^dukuh\s+/i, "").trim();
+   173→    } else if (lower.startsWith("ds.") || lower.startsWith("desa ")) {
+   174→      isDesa = true;
+   175→      text = p.replace(/^ds\.\s*/i, "").replace(/^desa\s+/i, "").trim();
+   176→    }
+   177→
+   178→    const isVenue = VENUE_KEYWORDS.test(p);
+   179→    return { text, isDusun, isDesa, isVenue };
+   180→  });
+   181→
+   182→  let lokasi: string | null = null;
+   183→  let dusun: string | null = null;
+   184→  let desa: string | null = null;
+   185→
+   186→  // Pass 1: explicit prefixes (strongest signal)
+   187→  const dusunExplicit = infos.find((i) => i.isDusun);
+   188→  const desaExplicit = infos.find((i) => i.isDesa);
+   189→  if (dusunExplicit) dusun = dusunExplicit.text;
+   190→  if (desaExplicit) desa = desaExplicit.text;
+   191→
+   192→  // Unmarked parts (no explicit prefix)
+   193→  const unmarked = infos.filter((i) => !i.isDusun && !i.isDesa);
+   194→
+   195→  if (unmarked.length > 0) {
+   196→    // Pass 2: venue keyword → lokasi
+   197→    const venuePart = unmarked.find((i) => i.isVenue);
+   198→    const nonVenue = unmarked.filter((i) => !i.isVenue);
+   199→
+   200→    if (venuePart) {
+   201→      lokasi = venuePart.text;
+   202→    }
+   203→
+   204→    // Pass 3: count-based assignment for non-venue unmarked parts
+   205→    if (dusun && desa) {
+   206→      // Both set by prefixes; all remaining non-venue → lokasi
+   207→      if (nonVenue.length > 0) {
+   208→        const extra = nonVenue.map((i) => i.text).join(", ");
+   209→        lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+   210→      }
+   211→    } else if (desa && !dusun) {
+   212→      // Desa set, dusun not: first non-venue → dusun, rest → lokasi
+   213→      if (nonVenue.length >= 1) {
+   214→        dusun = nonVenue[0].text;
+   215→        if (nonVenue.length > 1) {
+   216→          const extra = nonVenue.slice(1).map((i) => i.text).join(", ");
+   217→          lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+   218→        }
+   219→      }
+   220→    } else if (dusun && !desa) {
+   221→      // Dusun set, desa not: first non-venue → desa, rest → lokasi
+   222→      if (nonVenue.length >= 1) {
+   223→        desa = nonVenue[0].text;
+   224→        if (nonVenue.length > 1) {
+   225→          const extra = nonVenue.slice(1).map((i) => i.text).join(", ");
+   226→          lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+   227→        }
+   228→      }
+   229→    } else {
+   230→      // Neither dusun nor desa set: pure count-based (right-aligned)
+   231→      //   1 part  → desa
+   232→      //   2 parts → dusun + desa
+   233→      //   3+      → dusun + desa + (rest → lokasi)
+   234→      if (nonVenue.length === 1) {
+   235→        desa = nonVenue[0].text;
+   236→      } else if (nonVenue.length === 2) {
+   237→        dusun = nonVenue[0].text;
+   238→        desa = nonVenue[1].text;
+   239→      } else if (nonVenue.length >= 3) {
+   240→        dusun = nonVenue[0].text;
+   241→        desa = nonVenue[1].text;
+   242→        const extra = nonVenue.slice(2).map((i) => i.text).join(", ");
+   243→        lokasi = lokasi ? `${lokasi}, ${extra}` : extra;
+   244→      }
+   245→    }
+   246→  }
+   247→
+   248→  return { lokasi, dusun, desa, kec, kab, prov };
+   249→}
+   250→
+   251→function splitNames(text: string): string[] {
+   252→  if (!text) return [];
+   253→  const t = text.replace(/\s*&\s*/g, ",").replace(/&/g, ",");
+   254→  return t
+   255→    .split(",")
+   256→    .map((p) => p.trim())
+   257→    .filter(Boolean)
+   258→    // Rule: drop tokens containing "..." (placeholder for unknown name).
+   259→    // Catches "...?", "Bu ...?", "Mas ...?", etc.
+   260→    .filter((p) => !/\.{2,}/.test(p))
+   261→    // Rule: drop tokens with no letters (e.g., "?", "-", "...")
+   262→    .filter((p) => /[A-Za-zÀ-ÿ]/.test(p));
+   263→}
+   264→
+   265→/**
+   266→ * Rombongan name is kept AS-IS from the RAW source.
+   267→ *
+   268→ * The name may contain:
+   269→ *   - Multiple groups separated by " & " (e.g. "Sri Muda Rahayu & Wahyu Margi Utomo")
+   270→ *   - Homebase info with commas & Kec/Kab (e.g. "Wargo Ngudi Budoyo, Salaman, Lengkong Kec: Garung Kab: Wonosobo")
+   271→ *
+   272→ * We do NOT normalize or split — the homebase location embedded in the name is
+   273→ * NOT the pentas location, so it must stay verbatim for manual review in Excel.
+   274→ */
+   275→
+   276→interface RawEntry {
+   277→  header: string;
+   278→  extra: string[];
+   279→  tanggal: string | null; // date context at the time this entry was parsed
+   280→  sumber: string | null; // per-section source link (nearest "Sumber :" in this section)
+   281→}
+   282→
+   283→/**
+   284→ * Split MD into entries.
+   285→ *
+   286→ * Supports multi-day sources: a "Info Lengger <Day>, DD Month YYYY" line may
+   287→ * appear multiple times throughout the file. Each entry inherits the date
+   288→ * from the most recent "Info Lengger" line above it.
+   289→ *
+   290→ * Source link ("Sumber :") is tracked PER-SECTION. A new section starts at
+   291→ * each "Info Lengger" header. When a "Sumber :" line appears, it is assigned
+   292→ * to ALL entries in the current section (backfilled — "Sumber :" usually
+   293→ * appears at the END of a section, after the entries). This way, a single
+   294→ * file with multiple days can have a different source link per day, and each
+   295→ * row gets the correct source for its day.
+   296→ *
+   297→ * Also handles "-----" and "=====" separators (skipped, not section dividers).
+   298→ */
+   299→function splitEntries(mdText: string): {
+   300→  entries: RawEntry[];
+   301→  tanggalList: string[];
+   302→} {
+   303→  const rawLines = mdText.split(/\r?\n/).map((l) => l.replace(/\s+$/, ""));
+   304→  const lines = rawLines.filter((l) => l.trim().length > 0);
+   305→
+   306→  const entries: RawEntry[] = [];
+   307→  const tanggalList: string[] = [];
+   308→  let current: RawEntry | null = null;
+   309→  let currentDate: string | null = null;
+   310→  let currentSectionSumber: string | null = null;
+   311→  // Index in `entries` where the current section starts (for backfill).
+   312→  let sectionStartIndex = 0;
+   313→
+   314→  for (const ln of lines) {
+   315→    const trimmed = ln.trim();
+   316→
+   317→    // Skip "-----" and "=====" separators (not section dividers, just noise)
+   318→    if (/^-{3,}$/.test(trimmed)) continue;
+   319→    if (/^={3,}$/.test(trimmed)) continue;
+   320→
+   321→    // Detect "Info Lengger <Day>, DD Month YYYY" — starts a NEW section.
+   322→    // Flush the previous entry (if any) with its section's sumber, then reset
+   323→    // sumber so the new day starts with no inherited source.
+   324→    const infoMatch = trimmed.match(/^info lengger\s+.+$/i);
+   325→    if (infoMatch) {
+   326→      // If previous date had NO entries (current is null but currentDate exists),
+   327→      // create a placeholder entry so the date appears in the output with
+   328→      // catatan = "validasi ke sumber" (user can cross-check FB source).
+   329→      if (!current && currentDate) {
+   330→        entries.push({
+   331→          header: "",
+   332→          extra: [],
+   333→          tanggal: currentDate,
+   334→          sumber: currentSectionSumber,
+   335→        });
+   336→      }
+   337→      if (current) {
+   338→        current.sumber = currentSectionSumber;
+   339→        entries.push(current);
+   340→        current = null;
+   341→      }
+   342→      const parsed = parseDateStr(trimmed);
+   343→      if (parsed) {
+   344→        currentDate = parsed;
+   345→        if (!tanggalList.includes(parsed)) tanggalList.push(parsed);
+   346→      }
+   347→      currentSectionSumber = null;
+   348→      sectionStartIndex = entries.length;
+   349→      continue;
+   350→    }
+   351→
+   352→    // Detect "Sumber :" line — assign to current section (backfill all entries
+   353→    // in this section, plus the pending `current` entry).
+   354→    const sumberMatch = trimmed.match(/^Sumber\s*:\s*(.+)$/i);
+   355→    if (sumberMatch) {
+   356→      currentSectionSumber = sumberMatch[1].trim();
+   357→      // Backfill all already-pushed entries in this section
+   358→      for (let i = sectionStartIndex; i < entries.length; i++) {
+   359→        entries[i].sumber = currentSectionSumber;
+   360→      }
+   361→      // Also apply to the pending entry (last entry of section, not yet pushed)
+   362→      if (current) current.sumber = currentSectionSumber;
+   363→      continue;
+   364→    }
+   365→
+   366→    // New entry starts with "<n>_<text>"
+   367→    if (/^\d+_/.test(trimmed)) {
+   368→      if (current) {
+   369→        current.sumber = currentSectionSumber;
+   370→        entries.push(current);
+   371→      }
+   372→      current = {
+   373→        header: trimmed,
+   374→        extra: [],
+   375→        tanggal: currentDate,
+   376→        sumber: currentSectionSumber,
+   377→      };
+   378→    } else if (current) {
+   379→      current.extra.push(trimmed);
+   380→    }
+   381→  }
+   382→  // Flush the last pending entry with its section's sumber.
+   383→  // If the last date had no entries, create a placeholder (same logic as above).
+   384→  if (!current && currentDate) {
+   385→    entries.push({
+   386→      header: "",
+   387→      extra: [],
+   388→      tanggal: currentDate,
+   389→      sumber: currentSectionSumber,
+   390→    });
+   391→  }
+   392→  if (current) {
+   393→    current.sumber = currentSectionSumber;
+   394→    entries.push(current);
+   395→  }
+   396→
+   397→  return { entries, tanggalList };
+   398→}
+   399→
+   400→interface SpecialMapping {
+   401→  aktivitas_budaya: string;
+   402→  Peran_Rombongan: string;
+   403→  Gagrak: string | null;
+   404→}
+   405→
+   406→function mapSpecialActivity(label: string): SpecialMapping | null {
+   407→  const u = label.toUpperCase();
+   408→  if (u.includes("TAYUB")) {
+   409→    return {
+   410→      aktivitas_budaya: "Pentas Tayub",
+   411→      Peran_Rombongan: "Performer Rombongan Tayub",
+   412→      Gagrak: null,
+   413→    };
+   414→  }
+   415→  if (u.includes("LENGGERAN") && u.includes("JARANAN") && u.includes("WAROK")) {
+   416→    return {
+   417→      aktivitas_budaya: "Pentas Lenggeran, Jaranan & Warok",
+   418→      Peran_Rombongan: "Performer Rombongan Lenggeran, Jaranan & Warok",
+   419→      Gagrak: null,
+   420→    };
+   421→  }
+   422→  if (u.includes("JARANAN") && u.includes("WAROK")) {
+   423→    return {
+   424→      aktivitas_budaya: "Pentas Jaranan & Warok",
+   425→      Peran_Rombongan: "Performer Rombongan Jaranan & Warok",
+   426→      Gagrak: null,
+   427→    };
+   428→  }
+   429→  if (u.includes("TOPENG IRENG") && u.includes("WAROK")) {
+   430→    return {
+   431→      aktivitas_budaya: "Pentas Topeng Ireng & Warok",
+   432→      Peran_Rombongan: "Performer Rombongan Topeng Ireng & Warok",
+   433→      Gagrak: null,
+   434→    };
+   435→  }
+   436→  if (u.includes("WAROK")) {
+   437→    return {
+   438→      aktivitas_budaya: "Pentas Warok",
+   439→      Peran_Rombongan: "Performer Rombongan Warok",
+   440→      Gagrak: null,
+   441→    };
+   442→  }
+   443→  if (u.includes("JARANAN")) {
+   444→    return {
+   445→      aktivitas_budaya: "Pentas Jaranan",
+   446→      Peran_Rombongan: "Performer Rombongan Jaranan",
+   447→      Gagrak: null,
+   448→    };
+   449→  }
+   450→  return null;
+   451→}
+   452→
+   453→/**
+   454→ * Fill date gaps: for every date between the earliest and latest event date
+   455→ * that has NO rows, create a placeholder row with catatan = "validasi ke sumber".
+   456→ *
+   457→ * This ensures the Excel output has NO date gaps — every day appears, either
+   458→ * with events or with "validasi ke sumber" for manual cross-check.
+   459→ *
+   460→ * Use case: the FB scraper may have missed a post for a particular day, or
+   461→ * the post was photo-only (no caption text to parse). The user can:
+   462→ *   1. See the gap in the Excel output (date with "validasi ke sumber")
+   463→ *   2. Manually check the FB group for that date
+   464→ *   3. If a photo post exists, OCR it via the "Foto → OCR" tab
+   465→ *   4. Fill the missing data manually in Excel
+   466→ *
+   467→ * Only fills gaps between the EARLIEST and LATEST dates that already have
+   468→ * rows. Does NOT extend beyond the data range. Rows with null Tanggal are
+   469→ * ignored for gap-filling purposes (they go to the end after sort).
+   470→ */
+   471→function fillDateGaps(rows: RowData[]): void {
+   472→  // Collect all non-null dates
+   473→  const datesPresent = new Set<string>();
+   474→  for (const r of rows) {
+   475→    if (r.Tanggal) datesPresent.add(r.Tanggal);
+   476→  }
+   477→
+   478→  if (datesPresent.size === 0) return; // no dates at all → nothing to fill
+   479→
+   480→  // Find min and max dates (ISO format sorts correctly as strings)
+   481→  const sorted = [...datesPresent].sort();
+   482→  const minDate = sorted[0];
+   483→  const maxDate = sorted[sorted.length - 1];
+   484→
+   485→  // Generate all dates from min to max (inclusive)
+   486→  const gapRows: RowData[] = [];
+   487→  const d = new Date(minDate + "T00:00:00Z");
+   488→  const end = new Date(maxDate + "T00:00:00Z");
+   489→  while (d <= end) {
+   490→    const isoDate = d.toISOString().slice(0, 10);
+   491→    if (!datesPresent.has(isoDate)) {
+   492→      // This date has no rows → create placeholder
+   493→      gapRows.push({
+   494→        Tanggal: isoDate,
+   495→        TanggalSelesai: null,
+   496→        Jam: null,
+   497→        peristiwa: null,
+   498→        Kategori: null,
+   499→        aktivitas_budaya: null,
+   500→        Gagrak: null,
+   501→        nama_rombongan: null,
+   502→        Peran_Rombongan: null,
+   503→        nama_individu: null,
+   504→        peran_individu: null,
+   505→        sumber: null, // no FB post for this date (gap)
+   506→        bukti: null,
+   507→        Lokasi: null,
+   508→        "nama_dusun/kampung": null,
+   509→        "nama_desa/Kelurahan": null,
+   510→        kode_desa: null,
+   511→        Nama_Kecamatan: null,
+   512→        kode_kecamatan: null,
+   513→        nama_kabupaten: null,
+   514→        kode_kabupaten: null,
+   515→        nama_provinsi: null,
+   516→        tipe_sumber: null,
+   517→        tanggal_capture: new Date().toISOString().slice(0, 10),
+   518→        tingkat_verifikasi: "auto-scrape",
+   519→        status_consent: "public",
+   520→        kelengkapan: "tidak_ada",
+   521→        catatan_gap: "tidak ada event terdeteksi untuk tanggal ini (gap-fill)",
+   522→        catatan: "validasi ke sumber",
+   523→      });
+   524→    }
+   525→    d.setUTCDate(d.getUTCDate() + 1);
+   526→  }
+   527→
+   528→  // Append gap-fill rows to the main array (they'll be sorted by date below)
+   529→  rows.push(...gapRows);
+   530→}
+   531→
+   532→export function parseMd(mdText: string, filename?: string): ParseResult {
+   533→  const warnings: string[] = [];
+   534→  const fallbackTanggal = detectTanggal(mdText, filename);
+   535→  const { entries, tanggalList } = splitEntries(mdText);
+   536→
+   537→  // If no per-section date headers were found, fall back to single-date detection
+   538→  const effectiveTanggalList = tanggalList.length > 0
+   539→    ? tanggalList
+   540→    : (fallbackTanggal ? [fallbackTanggal] : []);
+   541→
+   542→  const rows: RowData[] = [];
+   543→
+   544→  for (const e of entries) {
+   545→    // Use entry's own date context; fall back to global fallback if missing
+   546→    const rowTanggal = e.tanggal ?? fallbackTanggal;
+   547→
+   548→    // Placeholder entry: date with NO events (header is empty).
+   549→    // This happens when a "Info Lengger <date>" header exists but no
+   550→    // "<n>_<lokasi>" entries follow it (the FB post was photo-only,
+   551→    // no caption text to parse). Create a row with Tanggal filled +
+   552→    // catatan = "validasi ke sumber" so user can cross-check the source.
+   553→    if (!e.header || !/^\d+_/.test(e.header)) {
+   554→      rows.push({
+   555→        Tanggal: rowTanggal,
+   556→        TanggalSelesai: null,
+   557→        Jam: null,
+   558→        peristiwa: null,
+   559→        Kategori: null,
+   560→        aktivitas_budaya: null,
+   561→        Gagrak: null,
+   562→        nama_rombongan: null,
+   563→        Peran_Rombongan: null,
+   564→        nama_individu: null,
+   565→        peran_individu: null,
+   566→        sumber: e.sumber,
+   567→        bukti: null,
+   568→        Lokasi: null,
+   569→        "nama_dusun/kampung": null,
+   570→        "nama_desa/Kelurahan": null,
+   571→        kode_desa: null,
+   572→        Nama_Kecamatan: null,
+   573→        kode_kecamatan: null,
+   574→        nama_kabupaten: null,
+   575→        kode_kabupaten: null,
+   576→        nama_provinsi: null,
+   577→        tipe_sumber: e.sumber ? "fieldnote" : null,
+   578→        tanggal_capture: new Date().toISOString().slice(0, 10),
+   579→        tingkat_verifikasi: "auto-scrape",
+   580→        status_consent: "public",
+   581→        kelengkapan: "tidak_ada",
+   582→        catatan_gap: "tidak ada event terdeteksi untuk tanggal ini",
+   583→        catatan: "validasi ke sumber",
+   584→      });
+   585→      continue;
+   586→    }
+   587→
+   588→    const loc = parseHeader(e.header);
+   589→
+   590→    let rombongan: string | null = null;
+   591→    let aktivitasSpecial: string | null = null;
+   592→    let lengger: string[] = [];
+   593→    let sinden: string[] = [];
+   594→    let artis: string[] = [];
+   595→    let wiraswara: string[] = [];
+   596→    let isMbeniTok = false;
+   597→
+   598→    for (const ln of e.extra) {
+   599→      const cleaned = ln.trim();
+   600→      if (!cleaned) continue;
+   601→
+   602→      // Detect "MBENGI TOK" / "MBENGI THOK" / "MBENI TOK" marker.
+   603→      // May appear standalone, quoted ("MBENGI THOK"), or embedded in a line.
+   604→      // If the line is PURELY the marker (after stripping quotes), set
+   605→      // isMbeniTok and skip — it must NOT be treated as aktivitasSpecial.
+   606→      const strippedForMbeni = cleaned.replace(/^"|"$/g, "").trim();
+   607→      if (/^mbeng?i\s*th?ok$/i.test(strippedForMbeni)) {
+   608→        isMbeniTok = true;
+   609→        continue;
+   610→      }
+   611→      // Embedded marker (e.g. marker inside other text) — set flag but
+   612→      // keep processing the line for other patterns.
+   613→      if (/mbeng?i\s*th?ok/i.test(cleaned)) {
+   614→        isMbeniTok = true;
+   615→      }
+   616→
+   617→      // Match "(Romb ...)" or abbreviation "(Rom ...)". Both forms appear in
+   618→      // real sources — some entries use "Rom" as shorthand for "Rombongan".
+   619→      const mRomb = cleaned.match(/^\(Romb?\s+(.*)\)\s*$/);
+   620→      if (mRomb) {
+   621→        // Keep rombongan name AS-IS from RAW source (no normalization).
+   622→        // The name may contain homebase info with " & " or "Kec:/Kab:" —
+   623→        // that is NOT the pentas location, so we preserve it verbatim.
+   624→        rombongan = mRomb[1].trim();
+   625→        continue;
+   626→      }
+   627→      // Quoted activity marker. Handles BOTH closed quotes ("TAYUB") and
+   628→      // unclosed quotes ("JARANAN & WAROK — missing closing quote in source).
+   629→      const mQuote = cleaned.match(/^"(.+?)"?\s*$/);
+   630→      if (mQuote) {
+   631→        aktivitasSpecial = mQuote[1].trim();
+   632→        continue;
+   633→      }
+   634→      if (/^lengger\s*:/i.test(cleaned)) {
+   635→        lengger = splitNames(cleaned.replace(/^lengger\s*:\s*/i, ""));
+   636→        continue;
+   637→      }
+   638→      if (/^sinden\s*:/i.test(cleaned)) {
+   639→        sinden = splitNames(cleaned.replace(/^sinden\s*:\s*/i, ""));
+   640→        continue;
+   641→      }
+   642→      // Also handle common misspellings: "Sinde:" instead of "Sinden:"
+   643→      if (/^sinde\s*:/i.test(cleaned)) {
+   644→        sinden = splitNames(cleaned.replace(/^sinde\s*:\s*/i, ""));
+   645→        continue;
+   646→      }
+   647→      if (/^artis[e]?\s*:/i.test(cleaned)) {
+   648→        artis = splitNames(cleaned.replace(/^artis[e]?\s*:\s*/i, ""));
+   649→        continue;
+   650→      }
+   651→      // Wiraswara = gamelan musician (niyogo player). New role.
+   652→      if (/^wiraswara\s*:/i.test(cleaned)) {
+   653→        wiraswara = splitNames(cleaned.replace(/^wiraswara\s*:\s*/i, ""));
+   654→        continue;
+   655→      }
+   656→    }
+   657→
+   658→    let aktivitas_budaya: string;
+   659→    let Peran_Rombongan: string;
+   660→    let Gagrak: string | null = null;
+   661→
+   662→    if (aktivitasSpecial) {
+   663→      const mapped = mapSpecialActivity(aktivitasSpecial);
+   664→      if (mapped) {
+   665→        aktivitas_budaya = mapped.aktivitas_budaya;
+   666→        Peran_Rombongan = mapped.Peran_Rombongan;
+   667→        Gagrak = mapped.Gagrak;
+   668→      } else {
+   669→        aktivitas_budaya = `Pentas ${aktivitasSpecial}`;
+   670→        Peran_Rombongan = `Performer Rombongan ${aktivitasSpecial}`;
+   671→        Gagrak = null;
+   672→      }
+   673→    } else {
+   674→      aktivitas_budaya = "Pentas Lengger";
+   675→      Peran_Rombongan = "Performer Rombongan Lengger";
+   676→      // Gagrak only applies to Pentas Lengger.
+   677→      // - With sinden → "Sindenan"
+   678→      // - Without sinden → "Bedhenan" (default pentas lengger)
+   679→      Gagrak = sinden.length > 0 ? "Sindenan" : "Bedhenan";
+   680→    }
+   681→
+   682→    const namaList: string[] = [];
+   683→    const peranList: string[] = [];
+   684→    for (const n of lengger) {
+   685→      namaList.push(n);
+   686→      peranList.push("Penari");
+   687→    }
+   688→    for (const n of artis) {
+   689→      namaList.push(n);
+   690→      peranList.push("Penari");
+   691→    }
+   692→    for (const n of sinden) {
+   693→      namaList.push(n);
+   694→      peranList.push("Sinden");
+   695→    }
+   696→    for (const n of wiraswara) {
+   697→      namaList.push(n);
+   698→      peranList.push("Wiraswara");
+   699→    }
+   700→
+   701→    // Build catatan_gap from missing fields
+   702→    const gaps: string[] = [];
+   703→    if (!rombongan) gaps.push("rombongan belum diketahui dari sumber");
+   704→    if (!loc.kec) gaps.push("kecamatan tidak terdeteksi");
+   705→    if (namaList.length === 0) gaps.push("tidak ada nama individu tercatat di sumber");
+   706→
+   707→    // Wilayah lookup — fill kode + fix typo + flag missing
+   708→    let kodeKab: string | null = null;
+   709→    let kodeKec: string | null = null;
+   710→    let kodeDesa: string | null = null;
+   711→    let namaKab = loc.kab;
+   712→    let namaKec = loc.kec;
+   713→    let namaDesa = loc.desa;
+   714→
+   715→    if (loc.kab) {
+   716→      const kabLookup = lookupKabupaten(loc.kab);
+   717→      if (kabLookup) {
+   718→        kodeKab = kabLookup.kode;
+   719→        namaKab = kabLookup.nama; // canonical name (fixes typo)
+   720→      } else {
+   721→        gaps.push(`kabupaten "${loc.kab}" belum ada di master wilayah`);
+   722→      }
+   723→    }
+   724→    if (loc.kec) {
+   725→      const kecLookup = lookupKecamatan(loc.kec);
+   726→      if (kecLookup) {
+   727→        kodeKec = kecLookup.kode;
+   728→        namaKec = kecLookup.nama; // canonical name (fixes typo)
+   729→      } else {
+   730→        gaps.push(`kecamatan "${loc.kec}" belum ada di master wilayah`);
+   731→      }
+   732→    }
+   733→    if (loc.desa) {
+   734→      const desaLookup = lookupDesa(loc.desa);
+   735→      if (desaLookup) {
+   736→        kodeDesa = desaLookup.kode;
+   737→        namaDesa = desaLookup.nama;
+   738→      }
+   739→      // Desa not in master is OK — only Wonosobo desa have codes for now
+   740→    }
+   741→
+   742→    const row: RowData = {
+   743→      Tanggal: rowTanggal,
+   744→      TanggalSelesai: null,
+   745→      Jam: isMbeniTok ? "19:30" : "15:30",
+   746→      peristiwa: null,
+   747→      Kategori: null,
+   748→      aktivitas_budaya,
+   749→      Gagrak,
+   750→      nama_rombongan: rombongan,
+   751→      Peran_Rombongan,
+   752→      nama_individu: namaList.length > 0 ? namaList.join("; ") : null,
+   753→      peran_individu: peranList.length > 0 ? peranList.join("; ") : null,
+   754→      sumber: e.sumber,
+   755→      bukti: null,
+   756→      Lokasi: loc.lokasi,
+   757→      "nama_dusun/kampung": loc.dusun,
+   758→      "nama_desa/Kelurahan": namaDesa,
+   759→      kode_desa: kodeDesa,
+   760→      Nama_Kecamatan: namaKec,
+   761→      kode_kecamatan: kodeKec,
+   762→      nama_kabupaten: namaKab,
+   763→      kode_kabupaten: kodeKab,
+   764→      nama_provinsi: loc.prov ?? (loc.kab ? DEFAULT_PROVINSI : null),
+   765→      // Provenance Layer (auto-filled from scraping)
+   766→      tipe_sumber: "fieldnote",
+   767→      tanggal_capture: new Date().toISOString().slice(0, 10),
+   768→      tingkat_verifikasi: "auto-scrape",
+   769→      status_consent: "public",
+   770→      // Data Quality Layer
+   771→      kelengkapan: gaps.length > 0 ? "partial" : "lengkap",
+   772→      catatan_gap: gaps.length > 0 ? gaps.join("; ") : null,
+   773→      catatan: null,
+   774→    };
+   775→
+   776→    if (!rombongan) {
+   777→      warnings.push(`Baris "${e.header}" tidak punya baris "(Romb ...)" — nama_rombongan dikosongkan.`);
+   778→    }
+   779→    if (!loc.kec) {
+   780→      warnings.push(`Baris "${e.header}" — kecamatan tidak terdeteksi.`);
+   781→    }
+   782→    if (namaList.length === 0) {
+   783→      warnings.push(`Baris "${e.header}" — tidak ada nama individu terdeteksi.`);
+   784→    }
+   785→
+   786→    rows.push(row);
+   787→  }
+   788→
+   789→  // ─── Fill date gaps ────────────────────────────────────────────────
+   790→  // For every date between the earliest and latest event date that has NO
+   791→  // rows, create a placeholder row with catatan = "validasi ke sumber".
+   792→  // This ensures the Excel output has NO date gaps — every day appears,
+   793→  // either with events or with "validasi ke sumber" for manual cross-check.
+   794→  // (The FB scraper may have missed a post, or the post was photo-only —
+   795→  // user can OCR the flyer via the "Foto → OCR" tab to fill the gap.)
+   796→  fillDateGaps(rows);
+   797→
+   798→  // Sort rows by Tanggal ascending. Entries with no date go last.
+   799→  // Secondary sort: by kabupaten, then kecamatan, then dusun — so within
+   800→  // the same date, rows are grouped by location (more organized output).
+   801→  // Entries with all-same keys keep their original source order (stable sort).
+   802→  rows.sort((a, b) => {
+   803→    // Primary: Tanggal (null dates go last via "9999-12-31" sentinel)
+   804→    const ta = a.Tanggal ?? "9999-12-31";
+   805→    const tb = b.Tanggal ?? "9999-12-31";
+   806→    if (ta !== tb) return ta < tb ? -1 : 1;
+   807→
+   808→    // Secondary: nama_kabupaten (alphabetical, nulls last)
+   809→    const ka = a.nama_kabupaten ?? "zzz";
+   810→    const kb = b.nama_kabupaten ?? "zzz";
+   811→    if (ka !== kb) return ka < kb ? -1 : 1;
+   812→
+   813→    // Tertiary: Nama_Kecamatan (alphabetical, nulls last)
+   814→    const ca = a.Nama_Kecamatan ?? "zzz";
+   815→    const cb = b.Nama_Kecamatan ?? "zzz";
+   816→    if (ca !== cb) return ca < cb ? -1 : 1;
+   817→
+   818→    // Quaternary: nama_dusun/kampung (alphabetical, nulls last)
+   819→    const da = a["nama_dusun/kampung"] ?? "zzz";
+   820→    const db = b["nama_dusun/kampung"] ?? "zzz";
+   821→    if (da !== db) return da < db ? -1 : 1;
+   822→
+   823→    // All keys equal → preserve source order (stable sort)
+   824→    return 0;
+   825→  });
+   826→
+   827→  // Sort tanggalList ascending too (for the preview header display)
+   828→  effectiveTanggalList.sort();
+   829→
+   830→  return { tanggalList: effectiveTanggalList, rows, warnings };
+   831→}
+   832→

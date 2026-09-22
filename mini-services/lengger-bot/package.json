@@ -1,0 +1,21 @@
+{
+  "name": "lengger-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts",
+    "gen-flyers": "bun src/gen-flyers.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "z-ai-web-dev-sdk": "*",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}
