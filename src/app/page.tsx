@@ -77,6 +77,7 @@ export default function Home() {
     hasFinal: boolean;
     finalSavedAt?: string;
     source: string;
+    sourceUrl?: string;
   }
   interface BotDayDetail {
     ok: boolean;
@@ -1368,6 +1369,37 @@ export default function Home() {
                     📱 <strong>Telegram report:</strong>{" "}
                     {botDayDetail.meta?.telegramReport}
                   </div>
+
+                  {/* Source link — for user validation (click to open original TikTok post) */}
+                  {botDayDetail.meta?.sourceUrl && (
+                    <div className="rounded-md bg-amber-50 border border-amber-300 px-3 py-3 text-sm">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="h-4 w-4 text-amber-700 mt-0.5 flex-shrink-0" />
+                        <div className="flex-1">
+                          <strong className="text-amber-900">Validasi:</strong>{" "}
+                          <span className="text-amber-800">
+                            Baca raw md di bawah, lalu klik link sumber untuk
+                            cek apakah VLM halu / ada typo / perlu perbaikan.
+                            Kalau sudah final, edit di editor final lalu Save Final.
+                          </span>
+                          <div className="mt-2">
+                            <a
+                              href={botDayDetail.meta.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1.5 text-blue-700 hover:text-blue-900 underline font-medium"
+                            >
+                              <ImageIcon className="h-3.5 w-3.5" />
+                              Link sumber TikTok (klik untuk validasi)
+                            </a>
+                          </div>
+                          <div className="mt-1 text-xs text-amber-700 break-all">
+                            {botDayDetail.meta.sourceUrl}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Photos */}
                   <div>

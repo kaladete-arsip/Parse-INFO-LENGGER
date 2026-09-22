@@ -58,7 +58,6 @@ worker/.dev.vars
 worker/.wrangler/
 worker/dist/
 upload/
-.github/workflows/
 
 # Binary/generated files (don't commit — regenerate locally)
 public/source.zip
