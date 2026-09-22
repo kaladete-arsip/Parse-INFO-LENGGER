@@ -7,6 +7,8 @@
     "dev": "bun --hot src/index.ts",
     "start": "bun src/index.ts",
     "ocr-real": "bun src/ocr-real-photo.ts",
+    "test-7-days": "bun src/test-7-days.ts",
+    "migrate-supabase": "bun src/migrate-to-supabase.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
