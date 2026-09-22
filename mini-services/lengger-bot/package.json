@@ -10,9 +10,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "z-ai-web-dev-sdk": "*",
+    "@supabase/supabase-js": "^2.116.0",
     "exceljs": "^4.4.0",
-    "jszip": "^3.10.2"
+    "jszip": "^3.10.2",
+    "z-ai-web-dev-sdk": "*"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -59,11 +59,15 @@ ATURAN:
 1. Mulai dengan header "Info Lengger <hari>, <tanggal>" — SALIN persis dari foto. Jika header tidak terbaca, tulis kosong.
 2. Untuk setiap entri: nomor urut + "_" + lokasi (dusun, desa, Kec, Kab) — SALIN persis dari foto.
 3. Tulis "MBENGI TOK" di baris terpisah SEBELUM Rombongan HANYA JIKA di foto ada tulisan "MBENGI TOK" / "MBENGI THOK".
-4. Jika TIDAK ada "MBENGI TOK" di foto DAN ada Jam yang terbaca, salin Jam dari foto. Jika Jam tidak terbaca, biarkan kosong (jangan isi 15:30 otomatis).
+4. Jika TIDAK ada "MBENGI TOK" di foto DAN ada Jam yang terbaca, salin Jam dari foto. Jika Jam tidak terbaca, JANGAN tulis baris "Jam:" sama sekali (biarkan tidak ada, jangan isi 15:30 otomatis).
 5. Nama lengkap: "Bu Yati", "Antok; Bagong" (multi nama pisah dengan "; ").
-6. Jangan dibuat-buat. Jika field tidak terbaca, tulis baris kosong (mis. "Sinden: " tanpa nama).
-7. Jika ada Sumber/kredit di flyer, akhiri dengan "Sumber: <kredit>" — salin persis.
-8. Output HANYA markdown di atas — tanpa penjelasan, tanpa code fences, tanpa pembukaan.`;
+6. JANGAN DIBUAT-BUAT. Setiap karakter yang Anda tulis HARUS terlihat di foto.
+7. **SINDEN**: Jika di entri itu TIDAK ada sinden (mis. entry WAROK, JARANAN & WAROK, TAYUB — genre non-sinden memang tidak pakai sinden), JANGAN tulis baris "Sinden:" sama sekali. Hanya tulis baris "Sinden: <nama>" jika ada nama sinden yang terbaca di foto.
+8. **LENGGER**: Sama — jika tidak ada nama lengger yang terbaca, JANGAN tulis baris "Lengger:" sama sekali.
+9. **ROMBONGAN**: Jika tidak ada nama rombongan yang terbaca, JANGAN tulis baris "Rombongan:" sama sekali.
+10. Singkatnya: JANGAN tulis baris field kosong (seperti "Sinden: " tanpa nama). Hanya tulis field jika ada isinya.
+11. Jika ada Sumber/kredit di flyer, akhiri dengan "Sumber: <kredit>" — salin persis.
+12. Output HANYA markdown di atas — tanpa penjelasan, tanpa code fences, tanpa pembukaan.`;
 
 export interface OcrResult {
   text: string;

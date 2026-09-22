@@ -36,10 +36,11 @@ ATURAN STRICT:
    - Huruf kapital di nama tempat/orang yang jelas salah (e.g. "kEndal" → "Kendal")
 5. Format lokasi: "<dusun>, <desa> Kec: <kec> Kab: <kab>"
 6. Multi-nama: pisah dengan "; " (semicolon spasi).
-7. Jam: "15:30" (sore) atau "19:30" (malam, dengan "MBENGI TOK" di baris sebelumnya).
-8. Jika "Sumber:" line ada di akhir, pertahankan.
-9. Hapus baris kosong berlebihan (max 1 baris kosong antar entri).
-10. Output harus valid MD yang bisa di-parse oleh parser Info Lengger.
+7. Jam: "15:30" (sore) atau "19:30" (malam, dengan "MBENGI TOK" di baris sebelumnya). Jika Jam tidak ada di input, JANGAN tambah.
+8. **HAPUS baris field yang kosong** — jangan tulis "Sinden: " tanpa nama, "Lengger: " tanpa nama, "Rombongan: " tanpa nama, "Jam: " tanpa jam. Jika field kosong di input, hapus barisnya di output. Ini karena genre non-sinden (WAROK, JARANAN & WAROK, TAYUB) memang tidak pakai sinden — jangan tulis baris Sinden kosong.
+9. Jika "Sumber:" line ada di akhir, pertahankan.
+10. Hapus baris kosong berlebihan (max 1 baris kosong antar entri).
+11. Output harus valid MD yang bisa di-parse oleh parser Info Lengger.
 
 CONTOH INPUT (dengan typo):
 "Lengger Senin, 22 September 2026\\n\\n1_Krajan, Lengkong Kec Mojoendung Kab Kendal\\nRomongan GAGRAK SENI MOJO\\nSinclen Bu Yati\\nLengger Antok Bagong\\nJam 15.30"

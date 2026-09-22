@@ -37,8 +37,10 @@ import {
   downloadPostPhotos,
   type TiktokPost,
 } from "./tiktok-source.js";
+import { uploadPhoto, upsertRecord, isSupabaseConfigured } from "./supabase.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 const TIKTOK_USERNAME = process.env.TIKTOK_USERNAME || "wonosobonyawijiingseni";
 
@@ -52,6 +54,29 @@ export interface PipelineResult {
 function countLocations(mdText: string): number {
   const matches = mdText.match(/^\s*\d+_/gm);
   return matches ? matches.length : 0;
+}
+
+/**
+ * Strip empty field lines — e.g. "Sinden: " (no name), "Lengger: " (no name),
+ * "Rombongan: " (no name), "Jam: " (no time).
+ *
+ * Why: non-sinden genres (WAROK, JARANAN & WAROK, TAYUB) genuinely don't have
+ * a sinden — writing "Sinden: " empty is misleading. Better to omit the line
+ * entirely so the parser + user knows that field is genuinely absent, not
+ * "unreadable OCR".
+ *
+ * This is a safety net — the VLM + LLM prompts also instruct to omit empty
+ * fields, but this guarantees it regardless of model behavior.
+ */
+function stripEmptyFieldLines(mdText: string): string {
+  return mdText
+    .split("\n")
+    .filter((line) => {
+      // Match lines like "Sinden: " or "Sinden:" with only whitespace after the colon
+      const m = line.match(/^(Sinden|Rombongan|Lengger|Jam|Artise|Wiraswara):\s*$/i);
+      return !m;
+    })
+    .join("\n");
 }
 
 /**
@@ -137,14 +162,19 @@ export async function runDailyPipeline(
   // 4. LLM typo fix
   console.log(`[pipeline] LLM typo fix on combined OCR (${combinedOcr.length} chars)...`);
   const fix = await fixTypos(combinedOcr);
-  const finalText = fix.ok ? fix.text : combinedOcr;
+  let finalText = fix.ok ? fix.text : combinedOcr;
   if (!fix.ok) {
     console.warn(`[pipeline] LLM fix failed (${fix.error}); using raw OCR text`);
   } else {
     console.log(`[pipeline] LLM fix OK (${finalText.length} chars)`);
   }
 
-  // 5. Save raw md (the LLM-fixed version)
+  // 4b. Safety net: strip empty field lines (e.g. "Sinden: " with no name)
+  // Non-sinden genres (WAROK, JARANAN & WAROK, TAYUB) genuinely don't have a
+  // sinden — don't write an empty Sinden line.
+  finalText = stripEmptyFieldLines(finalText);
+
+  // 5. Save raw md (the LLM-fixed + cleaned version)
   await saveRawMd(date, finalText);
 
   // 6. Count locations
@@ -176,6 +206,31 @@ export async function runDailyPipeline(
     ocrRawText: combinedOcr,
   };
   await writeMeta(date, meta);
+
+  // 9. OPTIONAL — sync to Supabase (if env vars configured)
+  if (isSupabaseConfigured()) {
+    console.log(`[pipeline] Syncing to Supabase...`);
+    const photoPaths: string[] = [];
+    for (const photoFile of savedPhotos) {
+      const photoPath = join(getPhotosDir(date), photoFile);
+      const buffer = await readFile(photoPath);
+      const supaPath = await uploadPhoto(date, photoFile, buffer);
+      if (supaPath) photoPaths.push(supaPath);
+    }
+    await upsertRecord({
+      date,
+      run_at: meta.runAt,
+      photo_count: meta.photoCount,
+      location_count: meta.locationCount,
+      telegram_report: meta.telegramReport,
+      source: meta.source,
+      source_url: meta.sourceUrl ?? null,
+      raw_md: finalText,
+      photo_paths: photoPaths,
+    });
+  } else {
+    console.log(`[pipeline] Supabase not configured (SUPABASE_URL/SUPABASE_SERVICE_KEY not set) — local storage only.`);
+  }
 
   console.log(`[pipeline] ✓ Done for ${date}: ${locationCount} locations from real TikTok post`);
   return { ok: true, meta };
