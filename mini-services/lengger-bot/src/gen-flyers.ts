@@ -61,6 +61,78 @@ function indonesianDate(iso: string): string {
 
 const FLYER_DATA: FlyerDay[] = [
   {
+    date: "2026-09-20",
+    dayName: "Minggu",
+    entries: [
+      {
+        dusun: "Tegalsari", desa: "Tegalsari", kecamatan: "Wonosobo", kabupaten: "Wonosobo",
+        rombongan: "SENJA LARAS", sinden: "Bu Yati", lengger: "Antok; Bagong",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+      {
+        dusun: "Krapyak", desa: "Krapyak", kecamatan: "Wonosobo", kabupaten: "Wonosobo",
+        rombongan: "WAHYU INDAH", sinden: "Bu Wiji", lengger: "Dani; Bayu",
+        aktivitas: "Pentas Lengger", jam: "19:30", mbenyiTtok: true,
+      },
+      {
+        dusun: "Sidorejo", desa: "Sidorejo", kecamatan: "Kertek", kabupaten: "Wonosobo",
+        rombongan: "GAGRUK MUDA", sinden: "Bu Sumi", lengger: "Eko; Rizal",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+      {
+        dusun: "Larangan", desa: "Larangan", kecamatan: "Kedu", kabupaten: "Magelang",
+        rombongan: "PUTRI MANDALA", sinden: "Bu Endang", lengger: "Faisal; Imam",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+      {
+        dusun: "Kembaran", desa: "Kembaran", kecamatan: "Baturraden", kabupaten: "Banyumas",
+        rombongan: "BUDI LESTARI", sinden: "Bu Rasmini", lengger: "Hadi; Yoga",
+        aktivitas: "Pentas Lengger", jam: "19:30", mbenyiTtok: true,
+      },
+      {
+        dusun: "Pekalongan", desa: "Pekalongan", kecamatan: "Wonopringgo", kabupaten: "Pekalongan",
+        rombongan: "RINJANI SAKTI", sinden: "Bu Ningsih", lengger: "Putra; Bagus",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+    ],
+  },
+  {
+    date: "2026-09-21",
+    dayName: "Senin",
+    entries: [
+      {
+        dusun: "Krajan", desa: "Lengkong", kecamatan: "Mojoendung", kabupaten: "Kendal",
+        rombongan: "GAGRAK SENI", sinden: "Bu Lasmi", lengger: "Tarno; Wawan",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+      {
+        dusun: "Banaran", desa: "Banaran", kecamatan: "Semarang Barat", kabupaten: "Semarang",
+        rombongan: "KARYA MUDI", sinden: "Bu Murti", lengger: "Asep; Dedi",
+        aktivitas: "Pentas Lengger", jam: "19:30", mbenyiTtok: true,
+      },
+      {
+        dusun: "Sawitan", desa: "Sawitan", kecamatan: "Kedu", kabupaten: "Magelang",
+        rombongan: "PERSADA MUDA", sinden: "Bu Rusmi", lengger: "Bowo; Aris",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+      {
+        dusun: "Kepar", desa: "Kepar", kecamatan: "Wonosobo", kabupaten: "Wonosobo",
+        rombongan: "SENENG LARAS", sinden: "Bu Yanti", lengger: "Guntur; Dimas",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+      {
+        dusun: "Bugel", desa: "Bugel", kecamatan: "Wonosobo", kabupaten: "Wonosobo",
+        rombongan: "PUTRI SIDIK", sinden: "Bu Wulan", lengger: "Agus; Heru",
+        aktivitas: "Pentas Lengger", jam: "19:30", mbenyiTtok: true,
+      },
+      {
+        dusun: "Ceporan", desa: "Ceporan", kecamatan: "Godean", kabupaten: "Sleman",
+        rombongan: "TURONGGO ASRI", sinden: "Bu Marfuah", lengger: "Andik; Catur",
+        aktivitas: "Pentas Lengger", jam: "15:30",
+      },
+    ],
+  },
+  {
     date: "2026-09-22",
     dayName: "Senin",
     entries: [

@@ -226,6 +226,8 @@ async function serveFlyerTemplate(file: string): Promise<Response> {
 
 const server = Bun.serve({
   port: PORT,
+  // Pipeline (VLM OCR + LLM fix) can take 30-60s; default 10s timeout would cut it off.
+  idleTimeout: 180, // 3 minutes — plenty for VLM + LLM, with margin for retries
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
