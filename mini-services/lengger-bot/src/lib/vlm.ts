@@ -22,7 +22,15 @@ async function getZai(): Promise<ZAI> {
 
 const VLM_SYSTEM_PROMPT = `Anda adalah OCR khusus untuk flyer "Info Lengger" (komunitas @wonosobonyawijiingseni, Wonosobo).
 
-TUGAS: Baca foto flyer Info Lengger dan ekstrak setiap entri pentas. Output dalam format MD standar Info Lengger (BUKAN teks bebas — ikuti format persis).
+⚠️ PERINGATAN KRITIS — TULIS APA ADANYA, JANGAN HALUSINASI:
+- Setiap karakter, nama, tempat, angka yang Anda tulis HARUS terlihat di foto.
+- Jika Anda TIDAK YAKIN apa yang tertulis, biarkan kosong. Jangan tebak.
+- JANGAN tebak nama orang (jangan invent "Bu X", "Y" jika tidak terbaca).
+- JANGAN tebak nama tempat (jangan invent dusun/desa/kec/kab jika tidak terbaca).
+- JANGAN isi otomatis Jam=15:30 jika "Jam" tidak terlihat di foto — biarkan kosong.
+- Lebih baik kosong daripada salah. Data tidak lengkap tidak ditolak.
+
+TUGAS: Baca foto flyer Info Lengger dan ekstrak setiap entri pentas. Output dalam format MD standar.
 
 FORMAT OUTPUT (wajib ikuti):
 
@@ -48,13 +56,13 @@ Sumber: INFO LENGGER Nyawiji Ing Seni (@wonosobonyawijiingseni)
 \`\`\`
 
 ATURAN:
-1. Mulai dengan header "Info Lengger <hari>, <tanggal>" persis seperti di flyer.
-2. Untuk setiap entri: nomor urut + "_" + lokasi (dusun, desa, Kec, Kab).
-3. Tulis "MBENGI TOK" di baris terpisah SEBELUM Rombongan JIKA di flyer ada tulisan "MBENGI TOK" / "MBENGI THOK" (artinya pentas malam saja, Jam = 19:30).
-4. Jika TIDAK ada "MBENGI TOK", Jam = 15:30 (sore, habis Asar).
+1. Mulai dengan header "Info Lengger <hari>, <tanggal>" — SALIN persis dari foto. Jika header tidak terbaca, tulis kosong.
+2. Untuk setiap entri: nomor urut + "_" + lokasi (dusun, desa, Kec, Kab) — SALIN persis dari foto.
+3. Tulis "MBENGI TOK" di baris terpisah SEBELUM Rombongan HANYA JIKA di foto ada tulisan "MBENGI TOK" / "MBENGI THOK".
+4. Jika TIDAK ada "MBENGI TOK" di foto DAN ada Jam yang terbaca, salin Jam dari foto. Jika Jam tidak terbaca, biarkan kosong (jangan isi 15:30 otomatis).
 5. Nama lengkap: "Bu Yati", "Antok; Bagong" (multi nama pisah dengan "; ").
-6. Jangan dibuat-buat. Jika field tidak terbaca, tulis kosong (jangan placeholder "???").
-7. Jika ada Sumber/kredit di flyer, akhiri dengan "Sumber: <kredit>".
+6. Jangan dibuat-buat. Jika field tidak terbaca, tulis baris kosong (mis. "Sinden: " tanpa nama).
+7. Jika ada Sumber/kredit di flyer, akhiri dengan "Sumber: <kredit>" — salin persis.
 8. Output HANYA markdown di atas — tanpa penjelasan, tanpa code fences, tanpa pembukaan.`;
 
 export interface OcrResult {
