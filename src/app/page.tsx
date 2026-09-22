@@ -15,6 +15,10 @@ import {
   ScanText,
   X,
   Sparkles,
+  Bot,
+  Play,
+  Save,
+  Calendar,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -43,7 +47,7 @@ export default function Home() {
   const [fileName, setFileName] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [preview, setPreview] = useState<ParsedPreview | null>(null);
-  const [activeTab, setActiveTab] = useState<"file" | "ocr" | "excel">("file");
+  const [activeTab, setActiveTab] = useState<"file" | "ocr" | "excel" | "bot">("file");
 
   // File-upload tab state
   const [isDragging, setIsDragging] = useState(false);
@@ -62,6 +66,34 @@ export default function Home() {
   const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null);
   const [ocrText, setOcrText] = useState<string>("");
   const [ocrConfidence, setOcrConfidence] = useState<number | null>(null);
+
+  // Bot Daily tab state
+  interface BotDayMeta {
+    date: string;
+    runAt: string;
+    photoCount: number;
+    locationCount: number;
+    telegramReport: string;
+    hasFinal: boolean;
+    finalSavedAt?: string;
+    source: string;
+  }
+  interface BotDayDetail {
+    ok: boolean;
+    meta: BotDayMeta;
+    rawMd: string | null;
+    finalMd: string | null;
+    photos: string[];
+  }
+  const [botDays, setBotDays] = useState<BotDayMeta[]>([]);
+  const [botSelectedDate, setBotSelectedDate] = useState<string | null>(null);
+  const [botDayDetail, setBotDayDetail] = useState<BotDayDetail | null>(null);
+  const [botFinalText, setBotFinalText] = useState<string>("");
+  const [botIsTriggering, setBotIsTriggering] = useState(false);
+  const [botIsLoadingDays, setBotIsLoadingDays] = useState(false);
+  const [botIsLoadingDetail, setBotIsLoadingDetail] = useState(false);
+  const [botIsSavingFinal, setBotIsSavingFinal] = useState(false);
+  const [botIsConvertingXlsx, setBotIsConvertingXlsx] = useState(false);
 
   // Revoke object URLs on unmount / when replaced
   useEffect(() => {
@@ -596,6 +628,171 @@ export default function Home() {
     if (excelInputRef.current) excelInputRef.current.value = "";
   }, []);
 
+  // ---------- Bot Daily tab handlers ----------
+  // All bot API calls go to the mini-service on port 3031 via the Caddy
+  // gateway, using ?XTransformPort=3031 (per sandbox networking rules).
+  const fetchBotDays = useCallback(async () => {
+    setBotIsLoadingDays(true);
+    try {
+      const res = await fetch("/api/days?XTransformPort=3031");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setBotDays(data.days ?? []);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({
+        title: "Gagal memuat daftar hari bot",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setBotIsLoadingDays(false);
+    }
+  }, []);
+
+  const fetchBotDayDetail = useCallback(async (date: string) => {
+    setBotIsLoadingDetail(true);
+    setBotDayDetail(null);
+    try {
+      const res = await fetch(`/api/day/${date}?XTransformPort=3031`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setBotDayDetail(data);
+      // Initialize the final-md editor with final if exists, else empty (user clicks "Init dari Raw")
+      setBotFinalText(data.finalMd ?? "");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({
+        title: `Gagal memuat detail ${date}`,
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setBotIsLoadingDetail(false);
+    }
+  }, []);
+
+  const onSelectBotDay = useCallback(
+    (date: string) => {
+      setBotSelectedDate(date);
+      fetchBotDayDetail(date);
+    },
+    [fetchBotDayDetail]
+  );
+
+  const onTriggerBotRun = useCallback(async () => {
+    setBotIsTriggering(true);
+    try {
+      const res = await fetch("/api/run?XTransformPort=3031", { method: "POST" });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      toast({
+        title: "Pipeline selesai",
+        description: `${data.meta?.date}: ${data.meta?.locationCount} lokasi terdeteksi. File ${data.meta?.date}-raw.md siap.`,
+      });
+      await fetchBotDays();
+      // Auto-select the just-run date
+      if (data.meta?.date) {
+        onSelectBotDay(data.meta.date);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({
+        title: "Pipeline gagal",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setBotIsTriggering(false);
+    }
+  }, [fetchBotDays, onSelectBotDay]);
+
+  const onSaveBotFinal = useCallback(async () => {
+    if (!botSelectedDate || !botFinalText.trim()) return;
+    setBotIsSavingFinal(true);
+    try {
+      const res = await fetch(`/api/day/${botSelectedDate}/final?XTransformPort=3031`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: botFinalText,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast({
+        title: "Final MD tersimpan",
+        description: `${botSelectedDate}-final.md disimpan di storage.`,
+      });
+      // Refresh the day detail + day list (to update hasFinal badge)
+      await fetchBotDayDetail(botSelectedDate);
+      await fetchBotDays();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({
+        title: "Save final gagal",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setBotIsSavingFinal(false);
+    }
+  }, [botSelectedDate, botFinalText, fetchBotDayDetail, fetchBotDays]);
+
+  const onConvertBotXlsx = useCallback(async () => {
+    if (!botSelectedDate || !botFinalText.trim()) return;
+    setBotIsConvertingXlsx(true);
+    try {
+      // Send the final md text in the body (so server uses latest edits, not stale storage)
+      const res = await fetch(`/api/day/${botSelectedDate}/convert-xlsx?XTransformPort=3031`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: botFinalText,
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (!data.base64) throw new Error("No base64 in response");
+      // Decode base64 → blob → download
+      const binary = atob(data.base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = data.filename || `${botSelectedDate}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({
+        title: "Excel terunduh",
+        description: `${data.filename} · ${data.rowsCount} baris · ${data.warnings?.length ?? 0} catatan parsing.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast({
+        title: "Convert to Excel gagal",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setBotIsConvertingXlsx(false);
+    }
+  }, [botSelectedDate, botFinalText]);
+
+  // Fetch bot days when the bot tab is first activated
+  useEffect(() => {
+    if (activeTab === "bot" && botDays.length === 0) {
+      fetchBotDays();
+    }
+  }, [activeTab, botDays.length, fetchBotDays]);
+
   return (
     <div className="min-h-screen flex flex-col bg-background">
       <header className="border-b bg-white sticky top-0 z-30">
@@ -653,9 +850,9 @@ export default function Home() {
       <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-8 space-y-6">
         <Tabs
           value={activeTab}
-          onValueChange={(v) => setActiveTab(v as "file" | "ocr" | "excel")}
+          onValueChange={(v) => setActiveTab(v as "file" | "ocr" | "excel" | "bot")}
         >
-          <TabsList className="grid w-full max-w-lg grid-cols-3">
+          <TabsList className="grid w-full max-w-2xl grid-cols-4">
             <TabsTrigger value="file" className="gap-1.5">
               <FileText className="h-4 w-4" /> RAW
             </TabsTrigger>
@@ -664,6 +861,9 @@ export default function Home() {
             </TabsTrigger>
             <TabsTrigger value="excel" className="gap-1.5">
               <FileSpreadsheet className="h-4 w-4" /> Excel
+            </TabsTrigger>
+            <TabsTrigger value="bot" className="gap-1.5">
+              <Bot className="h-4 w-4" /> Bot Daily
             </TabsTrigger>
           </TabsList>
 
@@ -1005,6 +1205,280 @@ export default function Home() {
                 </div>
               </CardContent>
             </Card>
+          </TabsContent>
+
+          {/* ============ TAB 4: Bot Daily ============ */}
+          <TabsContent value="bot" className="space-y-4">
+            {/* Top: trigger button + status badges */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Bot className="h-4 w-4 text-amber-700" />
+                  Bot Harian — YYYY-MM-DD-raw.md otomatis
+                </CardTitle>
+                <CardDescription>
+                  Bot otomatis tiap hari 15:00 WIB: ambil foto &rarr; VLM
+                  OCR &rarr; LLM croscek typo &rarr; simpan{" "}
+                  <code>YYYY-MM-DD-raw.md</code> + foto asli ke storage.
+                  Telegram masuk:{" "}
+                  <em>&quot;hari ini DD bulan ada N lokasi&quot;</em>. Anda
+                  croscek final buat nambah narasi.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-wrap items-center gap-3">
+                <Button
+                  onClick={onTriggerBotRun}
+                  disabled={botIsTriggering}
+                  className="gap-2"
+                >
+                  {botIsTriggering ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="h-4 w-4" />
+                  )}
+                  {botIsTriggering
+                    ? "Menjalankan..."
+                    : "Trigger Run (hari ini)"}
+                </Button>
+                <Button
+                  onClick={() => fetchBotDays()}
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  disabled={botIsLoadingDays}
+                >
+                  {botIsLoadingDays ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  )}
+                  Refresh
+                </Button>
+                <Badge variant="outline" className="text-xs gap-1">
+                  <Calendar className="h-3 w-3" /> Cron: 15:00 WIB
+                </Badge>
+                <Badge variant="outline" className="text-xs">
+                  {botDays.length} hari diproses
+                </Badge>
+              </CardContent>
+            </Card>
+
+            {/* Date list */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {botIsLoadingDays && botDays.length === 0 ? (
+                <Card className="col-span-full">
+                  <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                    <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                    Memuat daftar hari...
+                  </CardContent>
+                </Card>
+              ) : botDays.length === 0 ? (
+                <Card className="col-span-full border-dashed">
+                  <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                    Belum ada hari diproses. Klik{" "}
+                    <strong>&quot;Trigger Run&quot;</strong> untuk menjalankan
+                    pipeline hari ini.
+                  </CardContent>
+                </Card>
+              ) : (
+                botDays.map((day) => (
+                  <Card
+                    key={day.date}
+                    className={`cursor-pointer hover:border-amber-400 hover:bg-amber-50/30 transition ${
+                      botSelectedDate === day.date
+                        ? "border-amber-500 bg-amber-50/50"
+                        : ""
+                    }`}
+                    onClick={() => onSelectBotDay(day.date)}
+                  >
+                    <CardHeader className="p-4 pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-mono">
+                          {day.date}
+                        </CardTitle>
+                        {day.hasFinal ? (
+                          <Badge className="text-xs bg-emerald-100 text-emerald-800 hover:bg-emerald-100">
+                            final
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-xs">
+                            raw
+                          </Badge>
+                        )}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="p-4 pt-0 space-y-1 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <Calendar className="h-3 w-3 text-muted-foreground" />
+                        <span>
+                          {day.locationCount} lokasi &middot;{" "}
+                          {day.photoCount} foto
+                        </span>
+                      </div>
+                      <div
+                        className="text-muted-foreground truncate"
+                        title={day.telegramReport}
+                      >
+                        📱 {day.telegramReport.split("\n")[0]}
+                      </div>
+                      <div className="text-muted-foreground">
+                        Sumber: {day.source}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))
+              )}
+            </div>
+
+            {/* Detail panel */}
+            {botSelectedDate && botIsLoadingDetail && (
+              <Card>
+                <CardContent className="py-8 text-center text-sm text-muted-foreground">
+                  <Loader2 className="h-5 w-5 animate-spin mx-auto mb-2" />
+                  Memuat detail {botSelectedDate}...
+                </CardContent>
+              </Card>
+            )}
+
+            {botSelectedDate && botDayDetail && !botIsLoadingDetail && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center justify-between">
+                    <span className="flex items-center gap-2">
+                      <Calendar className="h-4 w-4 text-amber-700" />
+                      {botSelectedDate} &mdash; detail
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setBotSelectedDate(null)}
+                      className="h-7 px-2"
+                    >
+                      <X className="h-3.5 w-3.5" /> Tutup
+                    </Button>
+                  </CardTitle>
+                  <CardDescription>
+                    Foto asli + raw md (auto VLM + LLM) + editor final md
+                    (tambah narasi Anda).
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Telegram report banner */}
+                  <div className="rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-sm text-blue-900">
+                    📱 <strong>Telegram report:</strong>{" "}
+                    {botDayDetail.meta?.telegramReport}
+                  </div>
+
+                  {/* Photos */}
+                  <div>
+                    <label className="text-sm font-medium">
+                      Foto asli (simpan di storage)
+                    </label>
+                    <div className="flex flex-wrap gap-3 mt-2">
+                      {botDayDetail.photos.length === 0 ? (
+                        <p className="text-xs text-muted-foreground italic">
+                          Tidak ada foto tersimpan.
+                        </p>
+                      ) : (
+                        botDayDetail.photos.map((p) => (
+                          <a
+                            key={p}
+                            href={`/api/photo/${botSelectedDate}/${p}?XTransformPort=3031`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block rounded-md border overflow-hidden hover:border-amber-400 transition"
+                          >
+                            {/* Native <img> for blob URL preview — Next Image not needed for cross-port gateway */}
+                            <img
+                              src={`/api/photo/${botSelectedDate}/${p}?XTransformPort=3031`}
+                              alt={p}
+                              className="h-32 w-auto object-contain bg-muted/30"
+                            />
+                          </a>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Raw md (read-only) */}
+                  <div>
+                    <label className="text-sm font-medium">
+                      Raw MD (auto-generated &mdash; VLM OCR + LLM typo fix)
+                    </label>
+                    <Textarea
+                      value={botDayDetail.rawMd ?? ""}
+                      readOnly
+                      rows={10}
+                      className="mt-2 font-mono text-xs leading-relaxed bg-muted/20"
+                    />
+                  </div>
+
+                  {/* Final md editor */}
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-medium">
+                        Final MD (editor &mdash; tambah narasi Anda)
+                      </label>
+                      <span className="text-xs text-muted-foreground">
+                        {botDayDetail.finalMd
+                          ? "Sudah ada final — edit lalu Save"
+                          : "Belum ada final — klik \"Init dari Raw\" untuk mulai"}
+                      </span>
+                    </div>
+                    <Textarea
+                      value={botFinalText}
+                      onChange={(e) => setBotFinalText(e.target.value)}
+                      rows={14}
+                      className="mt-2 font-mono text-xs leading-relaxed"
+                      placeholder="Klik 'Init dari Raw' untuk copy raw md ke sini, lalu tambah narasi Anda..."
+                    />
+                    <div className="flex flex-wrap items-center gap-2 mt-3">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          setBotFinalText(botDayDetail.rawMd ?? "")
+                        }
+                        className="gap-1.5"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" /> Init dari Raw
+                      </Button>
+                      <Button
+                        onClick={onSaveBotFinal}
+                        disabled={botIsSavingFinal || !botFinalText.trim()}
+                        size="sm"
+                        className="gap-1.5"
+                      >
+                        {botIsSavingFinal ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Save className="h-3.5 w-3.5" />
+                        )}
+                        {botIsSavingFinal ? "Menyimpan..." : "Save Final"}
+                      </Button>
+                      <Button
+                        onClick={onConvertBotXlsx}
+                        disabled={
+                          botIsConvertingXlsx || !botFinalText.trim()
+                        }
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                      >
+                        {botIsConvertingXlsx ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Download className="h-3.5 w-3.5" />
+                        )}
+                        {botIsConvertingXlsx
+                          ? "Mengonversi..."
+                          : "Convert to Excel"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
         </Tabs>
 
