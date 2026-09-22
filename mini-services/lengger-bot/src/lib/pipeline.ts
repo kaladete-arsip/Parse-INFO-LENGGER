@@ -1,13 +1,19 @@
 /**
  * Daily pipeline — orchestrates the bot's daily run for a given date.
  *
+ * REAL TikTok downloader — no more fake flyers.
+ *
  * Steps:
- *   1. Pick sample flyer for `date` (or fallback to latest)
- *   2. Copy to storage/YYYY-MM-DD/photos/YYYY-MM-DD.png
- *   3. VLM OCR the photo → raw text
+ *   1. Find the TikTok photo post for `date` (search @wonosobonyawijiingseni's
+ *      recent posts for one titled "Info Lengger <Day>, <DD> <Month> <YYYY>")
+ *      — OR use a specific post URL if provided (TIKTOK_POST_URL env or
+ *      explicit argument).
+ *   2. Download ALL photos from that post to storage/YYYY-MM-DD/photos/
+ *      (full-resolution JPEGs, typically 1740x2176).
+ *   3. VLM OCR each photo → raw text
  *   4. LLM typo fix → cleaned md
  *   5. Count locations (entries with N_ prefix)
- *   6. Save YYYY-MM-DD-raw.md, photos, meta.json
+ *   6. Save YYYY-MM-DD-raw.md + update meta.json
  *   7. Send Telegram report ("hari ini DD bulan ada N lokasi")
  *
  * Returns the day's metadata.
@@ -18,15 +24,23 @@ import { fixTypos } from "./llm.js";
 import { sendTelegramReport } from "./telegram.js";
 import {
   ensureStorageDir,
-  pickSampleFlyer,
-  savePhoto,
   saveRawMd,
   writeMeta,
   readMeta,
+  getPhotosDir,
+  listPhotos,
   type DayMeta,
 } from "./storage.js";
-import { readFile } from "node:fs/promises";
-import { extname, basename } from "node:path";
+import {
+  fetchPost,
+  findPostByDate,
+  downloadPostPhotos,
+  type TiktokPost,
+} from "./tiktok-source.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
+const TIKTOK_USERNAME = process.env.TIKTOK_USERNAME || "wonosobonyawijiingseni";
 
 export interface PipelineResult {
   ok: boolean;
@@ -40,57 +54,90 @@ function countLocations(mdText: string): number {
   return matches ? matches.length : 0;
 }
 
-export async function runDailyPipeline(date: string): Promise<PipelineResult> {
+/**
+ * Run the daily pipeline for `date`.
+ *
+ * @param date ISO YYYY-MM-DD
+ * @param specificPostUrl optional TikTok post URL (skip the search step)
+ */
+export async function runDailyPipeline(
+  date: string,
+  specificPostUrl?: string
+): Promise<PipelineResult> {
   await ensureStorageDir();
   console.log(`[pipeline] Running daily pipeline for ${date}`);
 
-  // 1. Pick sample flyer
-  const flyerPath = await pickSampleFlyer(date);
-  if (!flyerPath) {
-    const msg = `No sample flyer available for ${date}. Run \`bun run gen-flyers\` first.`;
+  // 1. Find the TikTok post for this date
+  let post: TiktokPost | null = null;
+  try {
+    if (specificPostUrl) {
+      console.log(`[pipeline] Using specific post URL: ${specificPostUrl}`);
+      post = await fetchPost(specificPostUrl);
+    } else {
+      post = await findPostByDate(TIKTOK_USERNAME, date);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[pipeline] TikTok fetch failed: ${msg}`);
+    return { ok: false, meta: null, error: `TikTok fetch failed: ${msg}` };
+  }
+
+  if (!post) {
+    const msg = `No TikTok post found for ${date} (searched @${TIKTOK_USERNAME}'s recent posts for "Info Lengger" with that date).`;
     console.error(`[pipeline] ${msg}`);
     return { ok: false, meta: null, error: msg };
   }
 
-  const isExact = basename(flyerPath).startsWith(date);
-  const sourceLabel = isExact ? "sample-flyer" : "sample-flyer-fallback";
+  console.log(`[pipeline] Found post: "${post.title}" by ${post.authorName} (${post.imageUrls.length} photo(s))`);
 
-  // 2. Copy flyer photo to storage
-  const photoExt = extname(flyerPath) || ".png";
-  const photoName = `${date}${photoExt}`;
-  const buffer = await readFile(flyerPath);
-  await savePhoto(date, photoName, buffer);
-  console.log(`[pipeline] Saved photo: ${photoName} (${buffer.length} bytes)`);
+  // 2. Download all photos from the post
+  const savedPhotos = await downloadPostPhotos(date, post);
+  if (savedPhotos.length === 0) {
+    const msg = `No photos downloaded for ${date}.`;
+    console.error(`[pipeline] ${msg}`);
+    return { ok: false, meta: null, error: msg };
+  }
 
-  // 3. VLM OCR
-  console.log(`[pipeline] VLM OCR on ${flyerPath}...`);
-  const ocr = await ocrPhoto(flyerPath);
-  if (!ocr.ok || !ocr.text) {
-    const errMsg = `VLM OCR failed: ${ocr.error || "empty result"}`;
+  // 3. VLM OCR each photo
+  const photosDir = getPhotosDir(date);
+  const photoFiles = await listPhotos(date);
+  let combinedOcr = "";
+  for (const photoFile of photoFiles) {
+    const photoPath = join(photosDir, photoFile);
+    console.log(`[pipeline] VLM OCR on ${photoFile}...`);
+    const ocr = await ocrPhoto(photoPath);
+    if (!ocr.ok || !ocr.text) {
+      console.warn(`[pipeline] OCR failed for ${photoFile}: ${ocr.error || "empty"} (skipping, will use what we have)`);
+      continue;
+    }
+    console.log(`[pipeline] ✓ OCR OK on ${photoFile} (${ocr.text.length} chars)`);
+    combinedOcr += (combinedOcr ? "\n\n" : "") + ocr.text;
+  }
+
+  if (!combinedOcr.trim()) {
+    const errMsg = `VLM OCR returned empty for all photos of ${date}`;
     console.error(`[pipeline] ${errMsg}`);
-    // Still create a placeholder raw md + meta so the user knows it ran
     const placeholder = `Info Lengger ${date}\n\n; kelengkapan: tidak_ada\n; catatan_gap: ${errMsg}\n`;
     await saveRawMd(date, placeholder);
     const meta: DayMeta = {
       date,
       runAt: new Date().toISOString(),
-      photoCount: 1,
+      photoCount: savedPhotos.length,
       locationCount: 0,
-      telegramReport: `hari ini ${date} — OCR gagal (${errMsg.slice(0, 100)})`,
+      telegramReport: `hari ini ${date} — OCR gagal`,
       hasFinal: false,
-      source: sourceLabel,
+      source: "tiktok-real",
+      sourceUrl: post.postUrl,
       ocrRawText: "",
     };
     await writeMeta(date, meta);
     return { ok: false, meta, error: errMsg };
   }
 
-  console.log(`[pipeline] VLM OCR OK (${ocr.text.length} chars)`);
-
   // 4. LLM typo fix
-  console.log(`[pipeline] LLM typo fix...`);
-  const fix = await fixTypos(ocr.text);
-  const finalText = fix.ok ? fix.text : ocr.text;
+  console.log(`[pipeline] LLM typo fix on combined OCR (${combinedOcr.length} chars)...`);
+  const fix = await fixTypos(combinedOcr);
+  const finalText = fix.ok ? fix.text : combinedOcr;
   if (!fix.ok) {
     console.warn(`[pipeline] LLM fix failed (${fix.error}); using raw OCR text`);
   } else {
@@ -108,27 +155,28 @@ export async function runDailyPipeline(date: string): Promise<PipelineResult> {
   const { reportText, result: tgResult } = await sendTelegramReport(
     date,
     locationCount,
-    `(sumber: ${sourceLabel})`
+    `(sumber: TikTok @${TIKTOK_USERNAME})`
   );
   if (!tgResult.delivered) {
     console.warn(`[pipeline] Telegram report not delivered: ${tgResult.error}`);
   }
 
-  // 8. Update meta.json
+  // 8. Update meta.json (preserve hasFinal + finalSavedAt from any prior run)
   const existing = await readMeta(date);
   const meta: DayMeta = {
     date,
     runAt: new Date().toISOString(),
-    photoCount: 1,
+    photoCount: savedPhotos.length,
     locationCount,
     telegramReport: reportText,
     hasFinal: existing?.hasFinal ?? false,
     finalSavedAt: existing?.finalSavedAt,
-    source: sourceLabel,
-    ocrRawText: ocr.text,
+    source: "tiktok-real",
+    sourceUrl: post.postUrl,
+    ocrRawText: combinedOcr,
   };
   await writeMeta(date, meta);
 
-  console.log(`[pipeline] ✓ Done for ${date}: ${locationCount} locations`);
+  console.log(`[pipeline] ✓ Done for ${date}: ${locationCount} locations from real TikTok post`);
   return { ok: true, meta };
 }

@@ -130,12 +130,12 @@ async function getPhoto(date: string, filename: string): Promise<Response> {
   });
 }
 
-async function runPipeline(date: string): Promise<Response> {
+async function runPipeline(date: string, postUrl?: string): Promise<Response> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     return jsonError("Invalid date format. Use YYYY-MM-DD.", 400);
   }
-  console.log(`[http] Manual run for ${date}`);
-  const result = await runDailyPipeline(date);
+  console.log(`[http] Manual run for ${date}${postUrl ? ` (URL: ${postUrl})` : ""}`);
+  const result = await runDailyPipeline(date, postUrl);
   if (!result.ok) {
     return json({ ok: false, error: result.error, meta: result.meta }, 500);
   }
@@ -205,22 +205,7 @@ async function convertToXlsx(date: string, body: string): Promise<Response> {
   }
 }
 
-async function serveFlyerTemplate(file: string): Promise<Response> {
-  // Only allow .html files in flyer-templates/
-  const safe = file.replace(/[^a-zA-Z0-9._-]/g, "");
-  if (!safe.endsWith(".html")) {
-    return jsonError("Only .html files allowed.", 400);
-  }
-  const path = join(ROOT, "flyer-templates", safe);
-  if (!existsSync(path)) {
-    return jsonError(`Flyer template not found: ${safe}`, 404);
-  }
-  const text = await readFile(path, "utf-8");
-  return new Response(text, {
-    status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
-}
+// (serveFlyerTemplate removed — no more fake flyer HTML files)
 
 // ─── Bun.serve ────────────────────────────────────────────────
 
@@ -272,18 +257,21 @@ const server = Bun.serve({
     m = path.match(/^\/api\/photo\/(\d{4}-\d{2}-\d{2})\/([a-zA-Z0-9._-]+)$/);
     if (m && method === "GET") return await getPhoto(m[1], m[2]);
 
-    // /api/run (today)
+    // /api/run (today) — optional ?url=<tiktok_post_url> to use a specific post
     if (path === "/api/run" && method === "POST") {
-      return await runPipeline(todayInWIB());
+      const postUrl = url.searchParams.get("url") || undefined;
+      return await runPipeline(todayInWIB(), postUrl);
     }
 
-    // /api/run/:date
+    // /api/run/:date — optional ?url=<tiktok_post_url>
     m = path.match(/^\/api\/run\/(\d{4}-\d{2}-\d{2})$/);
-    if (m && method === "POST") return await runPipeline(m[1]);
+    if (m && method === "POST") {
+      const postUrl = url.searchParams.get("url") || undefined;
+      return await runPipeline(m[1], postUrl);
+    }
 
-    // /flyer-templates/:file.html
-    m = path.match(/^\/flyer-templates\/([a-zA-Z0-9._-]+\.html)$/);
-    if (m && method === "GET") return await serveFlyerTemplate(m[1]);
+    // /api/run/:date and /api/photo/:date/:filename handled above
+    // (flyer-templates route removed — bot now uses real TikTok photos only)
 
     return jsonError(`Not found: ${method} ${path}`, 404);
   },

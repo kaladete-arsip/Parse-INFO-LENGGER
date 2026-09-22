@@ -1936,3 +1936,65 @@ Stage Summary:
   - mini-services/lengger-bot/sample-flyers/2026-09-{22..26}.png (150-160KB each)
   - mini-services/lengger-bot/storage/2026-09-{22,23}/ (raw.md, final.md, meta.json, photos/)
   - src/app/page.tsx updated with 4th tab "Bot Daily"
+
+---
+Task ID: 4
+Agent: main
+Task: Fix the bot to download REAL TikTok photos (user feedback: "22 sept = nama lengger salah total; 22 sept foto asli salah total, AI halu, gak download foto asli; jangan over engineer, download saja foto asli resolusi tinggi, lalu OCR atau VLM")
+
+Work Log:
+- User correctly identified that the sample flyers were FAKE (HTML→PNG with made-up Lengger names) and the "original photo" was not a real download — it was an AI-generated HTML screenshot.
+- User provided the real TikTok post URL: https://www.tiktok.com/@wonosobonyawijiingseni/photo/7688234635414752530
+- Tried direct curl to TikTok URL → returned JS-only SPA shell (no og:image in static HTML).
+- Tried agent-browser to open TikTok URL → geo-blocked (sandbox IP detected as Hong Kong; TikTok HK is shut down: "We regret to inform you that we have discontinued operating TikTok in Hong Kong").
+- Tried TikTok oembed API → same HK geo-block page.
+- Found tikwm.com — a public TikTok content resolver API that fetches from non-blocked servers. Tested `curl https://www.tikwm.com/api/?url=<tiktok_url>` → returned real post data:
+  - title: "Info Lengger Selasa, 22 September 2026" (confirmed this is the real 22 Sept post)
+  - author: "INFO LENGGER (Nyawiji Ing Seni)" (the real account name)
+  - region: "ID" (Indonesia)
+  - images[]: array of direct TikTok CDN URLs (full-resolution)
+- Downloaded the real photo via curl from the TikTok CDN URL → 1740×2176 JPEG, 567KB (matches the expected full-resolution from the previous TikTok test in PLAN-1).
+- Saved to storage/2026-09-22/photos/2026-09-22.jpeg (deleted the fake 2026-09-22.png).
+- Ran VLM OCR on the REAL photo via `src/ocr-real-photo.ts` script → got REAL Lengger names:
+  - Entry 1: Windusari, Tlogojati Kec: Wonosobo — Rombongan: Jati Sari — Lengger: Qhori; Hasna; Gisha
+  - Entry 2: Bendo, Purwojati Kec: Kertek — Rombongan: Rukun Muda — Lengger: Ningrum; Ayuk (Temanggung)
+  - Entry 3: Wringin, Tlogodalem Kec: Kertek — Rombongan: Dalem Sari — Lengger: Bu Dian; Salma
+  - Entry 4: Deles, Wonosari Kec: Kalikajar — Rombongan: Restu Budaya — Sinden: Bu Yuli — Lengger: Bu Erni; Bu Ezti; Intan; Erada; Mbak Sukin; Suci; Ardi
+  - Entry 5: Durensawit Kec: Leksono — Rombongan: Taruna Budaya — Sinden: Bu Pur — Lengger: Sani; Amandha Pasya; Mbak Nor
+  - Entry 6: Kalijering Kec: Padureso Kab: Kebumen — Rombongan: Turonggo Budoyo — Sinden: Bu Ria — Lengger: Dhita
+  - These are 100% REAL names from the REAL TikTok post — completely different from my made-up fake data (which had Krajan/Lengkong/Kendal, Antok/Bagong, etc.).
+- Built `src/lib/tiktok-source.ts` — the REAL TikTok downloader module:
+  - `fetchPost(postUrl)` — fetch a specific TikTok photo post via tikwm.com API, returns { id, title, authorName, imageUrls[], postUrl }
+  - `findPostByDate(username, targetDate)` — query tikwm.com user/posts API, search for a post with title containing "Info Lengger ... <DD> <Month> <YYYY>"
+  - `downloadPostPhotos(date, post)` — download all images[] from a post to storage/<date>/photos/
+- Rewrote `src/lib/pipeline.ts` to use the REAL TikTok downloader:
+  - Step 1: findPostByDate() OR fetchPost(specificUrl) → get the real post
+  - Step 2: downloadPostPhotos() → save real high-res photos to storage
+  - Step 3: VLM OCR each photo → real text
+  - Step 4: LLM typo fix
+  - Step 5: save raw.md + meta.json (source: "tiktok-real", sourceUrl: real TikTok URL)
+  - NO MORE fake flyers.
+- Deleted the entire fake flyer system:
+  - `src/gen-flyers.ts` (deleted)
+  - `sample-flyers/` folder (deleted)
+  - `flyer-templates/` folder (deleted)
+  - `gen-flyers` npm script removed from package.json
+  - `pickSampleFlyer()` and `SAMPLE_FLYERS_DIR` removed from storage.ts
+  - `/flyer-templates/:file.html` route removed from index.ts
+- Deleted fake storage data: storage/2026-09-20/, 2026-09-21/, 2026-09-23/ (all had fake OCR from fake flyers). Deleted storage/2026-09-22/2026-09-22-final.md (had old fake narrative). Deleted storage/2026-09-22/photos/2026-09-22.png (fake HTML screenshot).
+- Updated `src/index.ts` HTTP server:
+  - `POST /api/run?url=<tiktok_url>` and `POST /api/run/:date?url=<tiktok_url>` now accept an optional `url` query param to use a specific TikTok post URL (skips the date-based search).
+- Restarted bot. Verified via agent-browser:
+  - Bot Daily tab → date card for 2026-09-22 shows: "raw" badge (was "final" before, fixed stale meta), "6 lokasi · 1 foto", "📱 hari ini 22 september ada 6 lokasi", "Sumber: tiktok-real"
+  - Clicked card → detail panel: photo link "2026-09-22.jpeg" (real TikTok photo, 1740×2176, 567KB), raw md showing real names (Windusari/Tlogojati/Qhori/Hasna/Gisha...), empty final md editor (Init dari Raw + Save Final + Convert to Excel buttons).
+  - Verified real photo served correctly via gateway: `curl http://localhost:81/api/photo/2026-09-22/2026-09-22.jpeg?XTransformPort=3031` → 1740×2176 JPEG, 567KB.
+
+Stage Summary:
+- The bot now downloads REAL high-resolution photos from TikTok (via tikwm.com proxy, since the sandbox IP is geo-blocked as Hong Kong by TikTok).
+- The "AI halu" problem is fixed — no more made-up Lengger names. The 22 Sept data now shows the REAL names from the REAL TikTok post by INFO LENGGER (Nyawiji Ing Seni): Qhori, Hasna, Gisha, Ningrum, Ayuk, Bu Dian, Salma, Bu Erni, Bu Ezti, Intan, Erada, Mbak Sukin, Suci, Ardi, Sani, Amandha Pasya, Mbak Nor, Dhita.
+- The "foto asli salah total" problem is fixed — the photo is a real 1740×2176 JPEG downloaded from the TikTok CDN, not an AI-generated HTML screenshot.
+- Pipeline is now simple (per user's "jangan over engineer"): download real photo → VLM OCR → LLM fix → save. No more flyer generation, no more HTML→PNG rendering, no more made-up data.
+- For the daily cron: the bot will call `findPostByDate("wonosobonyawijiingseni", today)` which queries tikwm.com's user/posts API and searches for a post titled "Info Lengger <Day>, <DD> <Month> <YYYY>". When found, it downloads the real photos and OCRs them.
+- For manual triggers with a specific URL: `POST /api/run/2026-09-22?url=https://www.tiktok.com/@wonosobonyawijiingseni/photo/7688234635414752530` skips the search and downloads that exact post.
+- Files: src/lib/tiktok-source.ts (new), src/lib/pipeline.ts (rewritten), src/ocr-real-photo.ts (new, one-off OCR script), src/index.ts (updated to support ?url= param), src/lib/storage.ts (cleaned up), package.json (removed gen-flyers script).
+- Deleted: src/gen-flyers.ts, sample-flyers/, flyer-templates/, fake storage folders (2026-09-20, 21, 23), fake 2026-09-22 final.md + photo.

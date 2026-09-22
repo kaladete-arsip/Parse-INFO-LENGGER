@@ -20,7 +20,6 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..", "..");
 export const STORAGE_DIR = join(ROOT, "storage");
-export const SAMPLE_FLYERS_DIR = join(ROOT, "sample-flyers");
 
 export interface DayMeta {
   date: string; // ISO YYYY-MM-DD
@@ -37,7 +36,6 @@ export interface DayMeta {
 
 export async function ensureStorageDir(): Promise<void> {
   await fs.mkdir(STORAGE_DIR, { recursive: true });
-  await fs.mkdir(SAMPLE_FLYERS_DIR, { recursive: true });
 }
 
 export function getDayDir(date: string): string {
@@ -130,20 +128,4 @@ export async function savePhoto(
 
 export function getPhotoPath(date: string, filename: string): string {
   return join(getPhotosDir(date), filename);
-}
-
-/** Pick the sample flyer PNG matching `date`, else fall back to the latest one. */
-export async function pickSampleFlyer(date: string): Promise<string | null> {
-  await ensureStorageDir();
-  if (!existsSync(SAMPLE_FLYERS_DIR)) return null;
-  const files = await fs.readdir(SAMPLE_FLYERS_DIR);
-  const pngs = files.filter((f) => /\.png$/i.test(f)).sort();
-  if (pngs.length === 0) return null;
-
-  // Exact match
-  const exact = pngs.find((f) => f.startsWith(date));
-  if (exact) return join(SAMPLE_FLYERS_DIR, exact);
-
-  // Fallback: latest available (with note in meta)
-  return join(SAMPLE_FLYERS_DIR, pngs[pngs.length - 1]);
 }

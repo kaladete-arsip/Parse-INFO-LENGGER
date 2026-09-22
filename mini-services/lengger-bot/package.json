@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "bun --hot src/index.ts",
     "start": "bun src/index.ts",
-    "gen-flyers": "bun src/gen-flyers.ts",
+    "ocr-real": "bun src/ocr-real-photo.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
