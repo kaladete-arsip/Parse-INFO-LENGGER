@@ -1,0 +1,23 @@
+{
+  "name": "lengger-bot-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker — Telegram bot for Info Lengger photo OCR via Gemini VLM + GLM typo fix",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "kv:create": "wrangler kv:namespace create BOT_KV",
+    "types": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^2.23.0",
+    "openai": "^4.80.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250901.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.90.0"
+  }
+}
